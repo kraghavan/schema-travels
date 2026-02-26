@@ -4,6 +4,7 @@
 
 > *"Stop guessing embed vs. reference. Let your query patterns decide."*
 
+[![CI](https://github.com/kraghavan/schema-travels/actions/workflows/ci.yml/badge.svg)](https://github.com/kraghavan/schema-travels/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![PyPI version](https://badge.fury.io/py/schema-travels.svg)](https://pypi.org/project/schema-travels/)
@@ -25,15 +26,54 @@ The right answer depends on **how you actually access your data**. But manually 
 **Schema Travels** analyzes your real query patterns and recommends an optimal MongoDB schema:
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+┌─────────────────┐     ┌───────────────────┐     ┌─────────────────┐
 │  Query Logs     │────▶│  Pattern Analysis │────▶│  AI-Powered     │
 │  + SQL Schema   │     │  • Hot joins      │     │  Recommendations│
 │                 │     │  • Co-access %    │     │  • EMBED        │
 │                 │     │  • Write ratios   │     │  • REFERENCE    │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
+└─────────────────┘     └───────────────────┘     └─────────────────┘
 ```
 
 **Result:** A MongoDB schema optimized for *your* access patterns — not generic "best practices."
+
+---
+
+## What's New in v1.1.0
+
+### 🔄 Reproducible Results with Caching
+
+Same inputs now produce the **same recommendations** every time:
+
+```bash
+# First run - calls Claude API
+schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql
+# → Cached to ~/.schema-travels/cache/
+
+# Second run - uses cache (instant, consistent)
+schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql
+# → Same recommendations, no API call
+
+# Force fresh analysis
+schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql --no-cache
+```
+
+### 🔑 Better API Key Errors
+
+Clear, actionable error when API key is missing:
+
+```
+╭─────────────────────────────────────────────────────────────────────╮
+│                    ⚠️  API KEY NOT CONFIGURED                        │
+├─────────────────────────────────────────────────────────────────────┤
+│  Schema Travels requires an Anthropic API key for AI-powered       │
+│  schema recommendations.                                            │
+│                                                                     │
+│  Option 1: export ANTHROPIC_API_KEY=sk-ant-xxxxx                   │
+│  Option 2: echo "ANTHROPIC_API_KEY=sk-ant-xxxxx" > .env            │
+│                                                                     │
+│  Get your API key at: https://console.anthropic.com/settings/keys  │
+╰─────────────────────────────────────────────────────────────────────╯
+```
 
 ---
 
@@ -48,6 +88,9 @@ pip install schema-travels
 ### Basic Usage
 
 ```bash
+# Set your API key
+export ANTHROPIC_API_KEY=sk-ant-xxxxx
+
 # Analyze your database
 schema-travels analyze \
     --logs-dir ./postgresql-logs \
@@ -136,6 +179,13 @@ order_items        →    order_items
 - **Confidence Scores** — Know how certain each recommendation is
 - **Detailed Reasoning** — Understand *why* each decision was made
 - **Warning Detection** — Get alerts for potential issues
+
+### 🔄 Reproducible Results (v1.1.0)
+
+- **Recommendation Caching** — Same inputs = same outputs
+- **Version Tracking** — Cache auto-invalidates when logic changes
+- **Comparison Tools** — Diff recommendations between runs
+- **Cache Control** — `--no-cache` for fresh analysis
 
 ### ⚡ Migration Simulation
 
@@ -232,6 +282,8 @@ schema-travels analyze \
     --output results.json       # Output file
     --use-ai                    # Enable AI recommendations (default)
     --no-ai                     # Use rule-based only
+    --no-cache                  # Bypass recommendation cache
+    --clear-cache               # Clear all cached recommendations
 ```
 
 ---
@@ -280,6 +332,18 @@ CREATE TABLE orders (
     user_id INTEGER REFERENCES users(id),
     total DECIMAL(10,2)
 );
+```
+
+---
+
+## Storage Locations
+
+```
+~/.schema-travels/
+├── schema_travels.db     # Analysis history (SQLite)
+└── cache/
+    ├── index.json        # Cache index with metadata
+    └── <hash>.json       # Cached recommendations
 ```
 
 ---
@@ -343,7 +407,7 @@ schema-travels/
 ├── src/schema_travels/
 │   ├── collector/      # Log parsing, schema extraction
 │   ├── analyzer/       # Pattern detection (hot joins, mutations)
-│   ├── recommender/    # AI recommendations, schema generation
+│   ├── recommender/    # AI recommendations, schema generation, caching
 │   ├── simulator/      # Migration impact estimation
 │   ├── persistence/    # SQLite storage for history
 │   └── cli/            # Command-line interface
@@ -383,6 +447,7 @@ ruff format src/
 - [x] MongoDB schema generation
 - [x] Claude AI integration
 - [x] Migration simulation
+- [x] Recommendation caching (v1.1.0)
 - [ ] DynamoDB support
 - [ ] Web UI dashboard
 - [ ] Real-time log streaming

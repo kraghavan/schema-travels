@@ -1,67 +1,107 @@
+# Architecture
+
+## System Overview
+
+```mermaid
+flowchart LR
+    subgraph Inputs
+        LOGS[("📄 Query Logs")]
+        SCHEMA[("📋 SQL Schema")]
+    end
+
+    subgraph Core["Schema Travels"]
+        direction TB
+        C["🔍 Collector"]
+        A["📊 Analyzer"]
+        R["🤖 Recommender"]
+        S["⚡ Simulator"]
+        
+        C --> A
+        A --> R
+        R --> S
+    end
+
+    subgraph External
+        CLAUDE["Claude API"]
+        CACHE[("🔄 Cache")]
+        DB[("💾 SQLite")]
+    end
+
+    subgraph Outputs
+        MONGO["MongoDB Schema"]
+        REPORT["📈 Migration Report"]
+    end
+
+    LOGS --> C
+    SCHEMA --> C
+    R <--> CLAUDE
+    R <--> CACHE
+    Core --> DB
+    S --> REPORT
+    R --> MONGO
+```
+
+## Detailed Data Flow
+
 ```mermaid
 flowchart TB
     subgraph Inputs["📥 Inputs"]
-        LOGS["Database Query Logs<br/>(PostgreSQL/MySQL)"]
-        SCHEMA["SQL Schema File<br/>(DDL)"]
+        LOGS["Database Query Logs<br/>PostgreSQL/MySQL"]
+        SCHEMA["SQL Schema File<br/>DDL"]
     end
 
     subgraph Collector["🔍 Collector Module"]
-        LP["Log Parser<br/><code>log_parser.py</code>"]
-        SP["Schema Parser<br/><code>schema_parser.py</code>"]
+        LP["Log Parser"]
+        SP["Schema Parser"]
         LP --> QD["QueryLog Objects"]
         SP --> SD["SchemaDefinition"]
     end
 
     subgraph Analyzer["📊 Analyzer Module"]
-        HJ["Hot Join Analyzer<br/><code>hot_joins.py</code>"]
-        MA["Mutation Analyzer<br/><code>mutations.py</code>"]
-        PA["Pattern Analyzer<br/><code>pattern_analyzer.py</code>"]
+        HJ["Hot Join Analyzer"]
+        MA["Mutation Analyzer"]
+        PA["Pattern Analyzer"]
         
-        HJ --> JP["Join Patterns<br/>Co-access Matrix"]
-        MA --> MP["Mutation Patterns<br/>Read/Write Ratios"]
+        HJ --> JP["Join Patterns"]
+        MA --> MP["Mutation Patterns"]
         JP --> PA
         MP --> PA
         PA --> AR["AnalysisResult"]
     end
 
     subgraph Recommender["🤖 Recommender Module"]
-        CA["Claude Advisor<br/><code>claude_advisor.py</code>"]
-        SG["Schema Generator<br/><code>schema_generator.py</code>"]
+        HASH["compute_input_hash()"]
+        CC["Cache Check"]
+        CA["Claude Advisor"]
+        CS["Cache Store"]
+        SG["Schema Generator"]
         
-        CA --> REC["SchemaRecommendations<br/>EMBED / REFERENCE"]
+        HASH --> CC
+        CC -->|Cache Hit| REC
+        CC -->|Cache Miss| CA
+        CA --> REC["Recommendations<br/>EMBED / REFERENCE"]
+        CA --> CS
         REC --> SG
-        SG --> TS["Target Schema<br/>(MongoDB/DynamoDB)"]
+        SG --> TS["Target Schema"]
     end
 
     subgraph Simulator["⚡ Simulator Module"]
-        CM["Cost Model<br/><code>cost_model.py</code>"]
-        MS["Migration Simulator<br/><code>simulator.py</code>"]
+        CM["Cost Model"]
+        MS["Migration Simulator"]
         
         CM --> MS
-        MS --> SR["SimulationResult<br/>Storage/Latency/Cost"]
+        MS --> SR["SimulationResult"]
     end
 
     subgraph Persistence["💾 Persistence"]
-        DB[("SQLite Database<br/><code>~/.schema-travels/</code>")]
-        REPO["Analysis Repository<br/><code>repository.py</code>"]
+        DB[("SQLite Database")]
+        CACHE[("Cache Files")]
+        REPO["Repository"]
         REPO <--> DB
+        CC <--> CACHE
+        CS --> CACHE
     end
 
-    subgraph CLI["⌨️ CLI Interface"]
-        ANALYZE["schema-travels analyze"]
-        REPORT["schema-travels report"]
-        HISTORY["schema-travels history"]
-        SIMULATE["schema-travels simulate"]
-    end
-
-    subgraph Outputs["📤 Outputs"]
-        JSON["JSON Report"]
-        CONSOLE["Console Output<br/>(Rich Tables)"]
-        MONGO["MongoDB Schema"]
-        DYNAMO["DynamoDB Schema"]
-    end
-
-    %% Flow connections
     LOGS --> LP
     SCHEMA --> SP
     
@@ -70,44 +110,106 @@ flowchart TB
     SD --> PA
     SD --> SG
     
-    AR --> CA
+    AR --> HASH
     AR --> MS
     TS --> MS
     
-    %% CLI connections
-    ANALYZE --> Collector
-    ANALYZE --> Analyzer
-    ANALYZE --> Recommender
-    SIMULATE --> Simulator
-    REPORT --> REPO
-    HISTORY --> REPO
-    
-    %% Output connections
     AR --> REPO
     REC --> REPO
     TS --> REPO
     SR --> REPO
-    
-    TS --> JSON
-    TS --> MONGO
-    TS --> DYNAMO
-    SR --> CONSOLE
-    AR --> CONSOLE
 
-    %% External API
-    CLAUDE_API["Claude API<br/>claude-opus-4-5"]
+    CLAUDE_API["Claude API"]
     CA <--> CLAUDE_API
-
-    %% Styling
-    classDef input fill:#e1f5fe,stroke:#01579b
-    classDef process fill:#fff3e0,stroke:#e65100
-    classDef ai fill:#f3e5f5,stroke:#7b1fa2
-    classDef storage fill:#e8f5e9,stroke:#2e7d32
-    classDef output fill:#fce4ec,stroke:#c2185b
-    
-    class LOGS,SCHEMA input
-    class LP,SP,HJ,MA,PA,CM,MS process
-    class CA,CLAUDE_API ai
-    class DB,REPO storage
-    class JSON,CONSOLE,MONGO,DYNAMO output
 ```
+
+## Module Details
+
+### Collector (`collector/`)
+
+| File | Purpose |
+|------|---------|
+| `log_parser.py` | Parse PostgreSQL/MySQL query logs |
+| `schema_parser.py` | Parse SQL DDL schemas |
+| `models.py` | Data models (QueryLog, SchemaDefinition) |
+
+### Analyzer (`analyzer/`)
+
+| File | Purpose |
+|------|---------|
+| `hot_joins.py` | Detect frequently joined tables |
+| `mutations.py` | Track read/write ratios per table |
+| `pattern_analyzer.py` | Combine patterns, calculate co-access |
+
+### Recommender (`recommender/`)
+
+| File | Purpose |
+|------|---------|
+| `claude_advisor.py` | AI recommendations via Claude API |
+| `schema_generator.py` | Generate MongoDB/DynamoDB schemas |
+| `cache.py` | **v1.1.0** - Hash-based recommendation caching |
+| `models.py` | Recommendation data models |
+
+### Simulator (`simulator/`)
+
+| File | Purpose |
+|------|---------|
+| `cost_model.py` | Storage/compute cost calculations |
+| `simulator.py` | Migration impact estimation |
+
+### Persistence (`persistence/`)
+
+| File | Purpose |
+|------|---------|
+| `database.py` | SQLite connection management |
+| `repository.py` | CRUD operations for analyses |
+
+## Storage Layout
+
+```
+~/.schema-travels/
+├── schema_travels.db           # Analysis history (SQLite)
+└── cache/
+    ├── index.json              # Cache metadata
+    │   {
+    │     "entries": {
+    │       "a1b2c3d4": {
+    │         "version": "1.0.0",
+    │         "model": "claude-sonnet-4-20250514",
+    │         "timestamp": "2025-02-26T10:30:00",
+    │         "num_recommendations": 5
+    │       }
+    │     }
+    │   }
+    ├── a1b2c3d4.json           # Cached recommendations
+    └── e5f6g7h8.json           # Another cached result
+```
+
+## Cache Flow (v1.1.0)
+
+```mermaid
+flowchart LR
+    INPUT["Schema + Analysis + Target"]
+    HASH["SHA256 Hash<br/>(first 16 chars)"]
+    CHECK{"Cache<br/>exists?"}
+    HIT["Return cached<br/>recommendations"]
+    MISS["Call Claude API"]
+    STORE["Store in cache"]
+    OUTPUT["Recommendations"]
+
+    INPUT --> HASH
+    HASH --> CHECK
+    CHECK -->|Yes| HIT
+    CHECK -->|No| MISS
+    MISS --> STORE
+    HIT --> OUTPUT
+    STORE --> OUTPUT
+```
+
+### Cache Invalidation
+
+Cache entries are invalidated when:
+1. `RECOMMENDATION_VERSION` is bumped in `cache.py`
+2. User passes `--no-cache` flag
+3. User passes `--clear-cache` flag
+4. Cache file is manually deleted

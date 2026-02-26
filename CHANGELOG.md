@@ -5,6 +5,46 @@ All notable changes to Schema Travels will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Planned
+- DynamoDB single-table design support
+- Web UI dashboard
+- Real-time log streaming
+
+---
+
+## [1.1.0] - 2025-02-26
+
+### Added
+- **Recommendation Caching**
+  - Hash-based caching for deterministic, reproducible results
+  - Same schema + logs = same recommendations (when cached)
+  - Cache stored in `~/.schema-travels/cache/`
+  - Version tracking to auto-invalidate on logic changes
+  - `--no-cache` flag to bypass cache and get fresh AI recommendations
+  - `--clear-cache` flag to invalidate all cached recommendations
+
+- **Cache Comparison**
+  - Compare recommendations between different runs
+  - Detect decision changes, confidence shifts, added/removed relationships
+  - `cache.compare(hash1, hash2)` API for programmatic comparison
+
+- **Improved API Key Validation**
+  - Clear, actionable error message when API key is missing
+  - Validates key format before making API calls
+  - Suggests `--no-ai` flag for rule-based only analysis
+
+### Changed
+- `APIKeyNotConfiguredError` now displays a formatted box with setup instructions
+- Cache index tracks model version and timestamp for each entry
+
+### Technical
+- New module: `recommender/cache.py`
+- `RECOMMENDATION_VERSION` constant for cache invalidation control
+- `compute_input_hash()` for deterministic input hashing
+
+---
 
 ## [1.0.0] - 2025-02-25
 
@@ -67,7 +107,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pydantic for configuration
 - Click for CLI
 - Rich for terminal formatting
-- 31% test coverage (initial)
 
 ---
 
@@ -78,3 +117,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basic proof of concept
 - Core module organization
 
+---
+
+[Unreleased]: https://github.com/kraghavan/schema-travels/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/kraghavan/schema-travels/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/kraghavan/schema-travels/releases/tag/v1.0.0
+[0.1.0]: https://github.com/kraghavan/schema-travels/releases/tag/v0.1.0
