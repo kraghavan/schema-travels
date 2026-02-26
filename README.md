@@ -62,17 +62,17 @@ schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql --no-cache
 Clear, actionable error when API key is missing:
 
 ```
-╭─────────────────────────────────────────────────────────────────────╮
-│                    ⚠️  API KEY NOT CONFIGURED                        │
-├─────────────────────────────────────────────────────────────────────┤
-│  Schema Travels requires an Anthropic API key for AI-powered       │
-│  schema recommendations.                                            │
-│                                                                     │
-│  Option 1: export ANTHROPIC_API_KEY=sk-ant-xxxxx                   │
-│  Option 2: echo "ANTHROPIC_API_KEY=sk-ant-xxxxx" > .env            │
-│                                                                     │
-│  Get your API key at: https://console.anthropic.com/settings/keys  │
-╰─────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────────────────────────╮
+│                    ⚠️  API KEY NOT CONFIGURED                         │
+├───────────────────────────────────────────────────────────────────────┤
+│  Schema Travels requires an Anthropic API key for AI-powered          │
+│  schema recommendations.                                              │
+│                                                                       │
+│  Option 1: export ANTHROPIC_API_KEY=sk-ant-xxxxx                      │
+│  Option 2: echo "ANTHROPIC_API_KEY=sk-ant-xxxxx" > .env               │
+│                                                                       │
+│  Get your API key at: https://console.anthropic.com/settings/keys     │
+╰───────────────────────────────────────────────────────────────────────╯
 ```
 
 ---
