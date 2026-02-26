@@ -1,0 +1,13 @@
+# Default owners for all files
+* @kraghavan
+
+# CI/CD
+/.github/ @kraghavan
+
+# Core modules
+/src/schema_travels/analyzer/ @kraghavan
+/src/schema_travels/recommender/ @kraghavan
+/src/schema_travels/collector/ @kraghavan
+
+# Documentation
+*.md @kraghavan

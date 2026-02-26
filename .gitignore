@@ -1,0 +1,31 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Git
+.git/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Docker
+
+# Docs - music/audio
+*.mp3
+
+.env
+my-first-analysis.json
+src/schema_travels.egg-info/
+src/schema_travels/py.typed
+src/schema_travels_ai.egg-info/
+dist/
