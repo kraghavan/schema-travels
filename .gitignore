@@ -22,3 +22,7 @@ __pycache__/
 
 # Docs - music/audio
 *.mp3
+
+.env
+my-first-analysis.json
+src/schema_travels.egg-info/
