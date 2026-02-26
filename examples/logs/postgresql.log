@@ -1,0 +1,38 @@
+2024-01-15 10:30:45.123 UTC [12345] app@ecommerce LOG:  statement: SELECT u.id, u.name, u.email FROM users u WHERE u.id = 1
+2024-01-15 10:30:45.125 UTC [12345] app@ecommerce LOG:  duration: 2.345 ms
+2024-01-15 10:30:45.200 UTC [12345] app@ecommerce LOG:  statement: SELECT o.id, o.status, o.total, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE o.user_id = 1 ORDER BY o.created_at DESC
+2024-01-15 10:30:45.215 UTC [12345] app@ecommerce LOG:  duration: 15.234 ms
+2024-01-15 10:30:45.300 UTC [12345] app@ecommerce LOG:  statement: SELECT oi.*, p.name, p.sku FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = 42
+2024-01-15 10:30:45.325 UTC [12345] app@ecommerce LOG:  duration: 8.567 ms
+2024-01-15 10:30:46.100 UTC [12346] app@ecommerce LOG:  statement: SELECT p.*, c.name as category_name FROM products p JOIN categories c ON p.category_id = c.id WHERE p.id = 123
+2024-01-15 10:30:46.108 UTC [12346] app@ecommerce LOG:  duration: 4.234 ms
+2024-01-15 10:30:46.200 UTC [12346] app@ecommerce LOG:  statement: SELECT * FROM product_images WHERE product_id = 123 ORDER BY sort_order
+2024-01-15 10:30:46.203 UTC [12346] app@ecommerce LOG:  duration: 1.123 ms
+2024-01-15 10:30:46.300 UTC [12346] app@ecommerce LOG:  statement: SELECT r.*, u.name as reviewer_name FROM reviews r JOIN users u ON r.user_id = u.id WHERE r.product_id = 123 ORDER BY r.created_at DESC LIMIT 10
+2024-01-15 10:30:46.320 UTC [12346] app@ecommerce LOG:  duration: 12.456 ms
+2024-01-15 10:30:47.000 UTC [12347] app@ecommerce LOG:  statement: INSERT INTO orders (user_id, status, total, shipping_address_id) VALUES (1, 'pending', 99.99, 5)
+2024-01-15 10:30:47.010 UTC [12347] app@ecommerce LOG:  duration: 5.678 ms
+2024-01-15 10:30:47.100 UTC [12347] app@ecommerce LOG:  statement: INSERT INTO order_items (order_id, product_id, quantity, unit_price, total_price) VALUES (100, 123, 2, 49.99, 99.98)
+2024-01-15 10:30:47.108 UTC [12347] app@ecommerce LOG:  duration: 3.234 ms
+2024-01-15 10:30:48.000 UTC [12348] app@ecommerce LOG:  statement: UPDATE orders SET status = 'processing', updated_at = NOW() WHERE id = 100
+2024-01-15 10:30:48.005 UTC [12348] app@ecommerce LOG:  duration: 2.123 ms
+2024-01-15 10:30:49.000 UTC [12349] app@ecommerce LOG:  statement: SELECT u.id, u.name, u.email FROM users u WHERE u.id = 2
+2024-01-15 10:30:49.002 UTC [12349] app@ecommerce LOG:  duration: 1.234 ms
+2024-01-15 10:30:49.100 UTC [12349] app@ecommerce LOG:  statement: SELECT o.id, o.status, o.total, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE o.user_id = 2 ORDER BY o.created_at DESC
+2024-01-15 10:30:49.118 UTC [12349] app@ecommerce LOG:  duration: 14.567 ms
+2024-01-15 10:30:50.000 UTC [12350] app@ecommerce LOG:  statement: SELECT p.*, c.name as category_name FROM products p JOIN categories c ON p.category_id = c.id WHERE c.id = 5
+2024-01-15 10:30:50.025 UTC [12350] app@ecommerce LOG:  duration: 18.234 ms
+2024-01-15 10:30:50.100 UTC [12350] app@ecommerce LOG:  statement: SELECT * FROM addresses WHERE user_id = 1
+2024-01-15 10:30:50.102 UTC [12350] app@ecommerce LOG:  duration: 1.567 ms
+2024-01-15 10:30:51.000 UTC [12351] app@ecommerce LOG:  statement: SELECT p.*, c.name as category_name FROM products p JOIN categories c ON p.category_id = c.id WHERE p.id = 456
+2024-01-15 10:30:51.006 UTC [12351] app@ecommerce LOG:  duration: 3.890 ms
+2024-01-15 10:30:51.050 UTC [12351] app@ecommerce LOG:  statement: SELECT * FROM product_images WHERE product_id = 456 ORDER BY sort_order
+2024-01-15 10:30:51.052 UTC [12351] app@ecommerce LOG:  duration: 1.234 ms
+2024-01-15 10:30:52.000 UTC [12352] app@ecommerce LOG:  statement: SELECT o.id, o.status, o.total, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE o.user_id = 3 ORDER BY o.created_at DESC
+2024-01-15 10:30:52.020 UTC [12352] app@ecommerce LOG:  duration: 16.789 ms
+2024-01-15 10:30:52.100 UTC [12352] app@ecommerce LOG:  statement: SELECT oi.*, p.name, p.sku FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = 55
+2024-01-15 10:30:52.115 UTC [12352] app@ecommerce LOG:  duration: 9.123 ms
+2024-01-15 10:30:53.000 UTC [12353] app@ecommerce LOG:  statement: UPDATE products SET inventory_count = inventory_count - 2 WHERE id = 123
+2024-01-15 10:30:53.003 UTC [12353] app@ecommerce LOG:  duration: 2.456 ms
+2024-01-15 10:30:54.000 UTC [12354] app@ecommerce LOG:  statement: INSERT INTO reviews (user_id, product_id, rating, title, body) VALUES (1, 123, 5, 'Great product!', 'Really happy with my purchase.')
+2024-01-15 10:30:54.008 UTC [12354] app@ecommerce LOG:  duration: 4.567 ms
