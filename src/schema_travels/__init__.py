@@ -1,4 +1,11 @@
-"""Schema Travels - Access Pattern Analyzer for SQL to NoSQL Migration."""
+"""Schema Travels - Intelligent SQL to NoSQL Schema Migration.
 
-__version__ = "0.1.0"
+Analyzes database query patterns to recommend optimal MongoDB schema design.
+"""
+
+__version__ = "1.0.0"
 __author__ = "Karthik Raghavan"
+
+from schema_travels.config import get_settings
+
+__all__ = ["__version__", "get_settings"]

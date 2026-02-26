@@ -4,23 +4,48 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "schema-travels"
-version = "0.1.0"
-description = "Access Pattern Analyzer for SQL to NoSQL Schema Migration"
+version = "1.0.0"
+description = "Intelligent SQL to NoSQL schema migration - analyzes query patterns to recommend optimal MongoDB schema design"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "Karthik Raghavan", email = "kraghavan@example.com"}
+    {name = "Karthik Raghavan"}
 ]
-keywords = ["database", "migration", "nosql", "mongodb", "dynamodb", "schema"]
+maintainers = [
+    {name = "Karthik Raghavan"}
+]
+keywords = [
+    "database",
+    "migration", 
+    "nosql",
+    "mongodb",
+    "postgresql",
+    "mysql",
+    "schema",
+    "sql",
+    "data-modeling",
+    "etl",
+    "ai",
+    "claude",
+    "llm"
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+    "Typing :: Typed",
 ]
 
 dependencies = [
@@ -40,6 +65,8 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "hypothesis>=6.0.0",
+    "build>=1.0.0",
+    "twine>=4.0.0",
 ]
 
 [project.scripts]
@@ -47,19 +74,30 @@ schema-travels = "schema_travels.cli.main:cli"
 
 [project.urls]
 Homepage = "https://github.com/kraghavan/schema-travels"
+Documentation = "https://github.com/kraghavan/schema-travels#readme"
 Repository = "https://github.com/kraghavan/schema-travels.git"
 Issues = "https://github.com/kraghavan/schema-travels/issues"
+Changelog = "https://github.com/kraghavan/schema-travels/releases"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+schema_travels = ["py.typed"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["schema_travels"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -71,3 +109,16 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+packages = ["schema_travels"]
+
+[tool.coverage.run]
+source = ["src/schema_travels"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
