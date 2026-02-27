@@ -3,7 +3,7 @@
 Analyzes database query patterns to recommend optimal MongoDB schema design.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Karthik Raghavan"
 
 from schema_travels.config import get_settings

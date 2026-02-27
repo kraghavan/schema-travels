@@ -18,7 +18,7 @@ from schema_travels.collector import PostgresLogParser, MySQLLogParser, SchemaPa
 from schema_travels.analyzer import PatternAnalyzer
 from schema_travels.recommender import ClaudeAdvisor, SchemaGenerator
 from schema_travels.recommender.models import TargetDatabase
-from schema_travels.recommender.cache import compute_input_hash, get_cache
+from schema_travels.recommender.cache import compute_input_hash, get_cache, CacheMode
 from schema_travels.simulator import MigrationSimulator, SimulationConfig
 from schema_travels.persistence import Database, AnalysisRepository
 
@@ -94,6 +94,12 @@ def cli(verbose: bool) -> None:
     default=False,
     help="Clear all cached recommendations before running",
 )
+@click.option(
+    "--cache-mode",
+    type=click.Choice(["relaxed", "strict"]),
+    default="relaxed",
+    help="Cache mode: 'relaxed' ignores small log changes, 'strict' invalidates on any change",
+)
 def analyze(
     logs_dir: Path,
     schema_file: Path,
@@ -103,13 +109,25 @@ def analyze(
     use_ai: bool,
     no_cache: bool,
     clear_cache: bool,
+    cache_mode: str,
 ) -> None:
     """Analyze database access patterns and generate recommendations.
 
     Parses query logs and schema to identify hot joins, mutation patterns,
     and co-access patterns. Generates recommendations for NoSQL schema design.
     
-    Use --no-cache to bypass cached recommendations and get fresh AI analysis.
+    Cache modes:
+    
+    \b
+    - relaxed (default): Ignores small log changes. Cache invalidates only when
+      schema changes or access patterns significantly change (new joins, tables
+      flip from read-heavy to write-heavy).
+    
+    \b
+    - strict: Any change in query counts invalidates cache. Use when you want
+      fresh recommendations for every data change.
+    
+    Use --no-cache to bypass cache entirely for one run.
     Use --clear-cache to invalidate all cached recommendations.
     """
     analysis_id = str(uuid.uuid4())[:8]
@@ -186,7 +204,8 @@ def analyze(
                     recommendations = analyzer.get_embedding_recommendations(result)
                 else:
                     # Compute input hash for cache lookup
-                    input_hash = compute_input_hash(schema, result, target_db)
+                    mode = CacheMode(cache_mode)
+                    input_hash = compute_input_hash(schema, result, target_db, mode)
                     
                     # Check cache first (unless --no-cache)
                     if not no_cache:
@@ -197,7 +216,7 @@ def analyze(
                         if cached_recs:
                             recommendations = cached_recs
                             cache_used = True
-                            console.print(f"  [green]✓ Using cached recommendations[/green] [dim](hash: {input_hash})[/dim]")
+                            console.print(f"  [green]✓ Using cached recommendations[/green] [dim](hash: {input_hash}, mode: {cache_mode})[/dim]")
                     
                     # If not cached, call Claude API
                     if not recommendations:
@@ -214,8 +233,9 @@ def analyze(
                                 "analysis_id": analysis_id,
                                 "logs_dir": str(logs_dir),
                                 "schema_file": str(schema_file),
+                                "cache_mode": cache_mode,
                             })
-                            console.print(f"  [dim]Cached recommendations (hash: {input_hash})[/dim]")
+                            console.print(f"  [dim]Cached recommendations (hash: {input_hash}, mode: {cache_mode})[/dim]")
                             
                         except APIKeyNotConfiguredError as e:
                             console.print(e.message)
@@ -295,6 +315,7 @@ def analyze(
             output_data = {
                 "analysis_id": analysis_id,
                 "cache_used": cache_used,
+                "cache_mode": cache_mode,
                 "analysis": result.to_dict(),
                 "recommendations": [r.to_dict() if hasattr(r, 'to_dict') else r for r in recommendations],
                 "target_schema": target_schema.to_dict(),

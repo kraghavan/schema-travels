@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--no-cache` flag to bypass cache and get fresh AI recommendations
   - `--clear-cache` flag to invalidate all cached recommendations
 
+- **Cache Modes** (`--cache-mode`)
+  - `relaxed` (default): Ignores small log changes. Cache invalidates only on 
+    significant pattern changes (new joins, schema changes, tables flipping 
+    from read-heavy to write-heavy)
+  - `strict`: Any change in query counts invalidates cache. Use when you want
+    fresh recommendations for every data change.
+
 - **Cache Comparison**
   - Compare recommendations between different runs
   - Detect decision changes, confidence shifts, added/removed relationships
@@ -41,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Technical
 - New module: `recommender/cache.py`
+- New enum: `CacheMode` (relaxed, strict)
 - `RECOMMENDATION_VERSION` constant for cache invalidation control
 - `compute_input_hash()` for deterministic input hashing
 

@@ -26,21 +26,40 @@ The right answer depends on **how you actually access your data**. But manually 
 **Schema Travels** analyzes your real query patterns and recommends an optimal MongoDB schema:
 
 ```
-┌─────────────────┐     ┌───────────────────┐     ┌─────────────────┐
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │  Query Logs     │────▶│  Pattern Analysis │────▶│  AI-Powered     │
 │  + SQL Schema   │     │  • Hot joins      │     │  Recommendations│
 │                 │     │  • Co-access %    │     │  • EMBED        │
 │                 │     │  • Write ratios   │     │  • REFERENCE    │
-└─────────────────┘     └───────────────────┘     └─────────────────┘
+└─────────────────┘     └──────────────────┘     └─────────────────┘
 ```
 
 **Result:** A MongoDB schema optimized for *your* access patterns — not generic "best practices."
 
 ---
 
-## What's New in v1.1.0
+## What's New in v1.2.0
 
-### 🔄 Reproducible Results with Caching
+### 🎛️ Cache Modes
+
+Control how sensitive the cache is to log changes:
+
+```bash
+# Relaxed (default): Ignores small log changes
+# Cache invalidates only on significant pattern changes
+schema-travels analyze --cache-mode relaxed ...
+
+# Strict: Any change in query counts = fresh recommendations  
+schema-travels analyze --cache-mode strict ...
+```
+
+| Scenario | Relaxed | Strict |
+|----------|---------|--------|
+| 2 extra log lines | ✅ Cache hit | ❌ Fresh AI call |
+| New join pair found | ❌ Fresh AI call | ❌ Fresh AI call |
+| Schema DDL changed | ❌ Fresh AI call | ❌ Fresh AI call |
+
+### 🔄 Reproducible Results with Caching (v1.1.0)
 
 Same inputs now produce the **same recommendations** every time:
 
@@ -57,22 +76,22 @@ schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql
 schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql --no-cache
 ```
 
-### 🔑 Better API Key Errors
+### 🔑 Better API Key Errors (v1.1.0)
 
 Clear, actionable error when API key is missing:
 
 ```
-╭───────────────────────────────────────────────────────────────────────╮
-│                    ⚠️  API KEY NOT CONFIGURED                         │
-├───────────────────────────────────────────────────────────────────────┤
-│  Schema Travels requires an Anthropic API key for AI-powered          │
-│  schema recommendations.                                              │
-│                                                                       │
-│  Option 1: export ANTHROPIC_API_KEY=sk-ant-xxxxx                      │
-│  Option 2: echo "ANTHROPIC_API_KEY=sk-ant-xxxxx" > .env               │
-│                                                                       │
-│  Get your API key at: https://console.anthropic.com/settings/keys     │
-╰───────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────────────────────────────────────────────╮
+│                    ⚠️  API KEY NOT CONFIGURED                        │
+├─────────────────────────────────────────────────────────────────────┤
+│  Schema Travels requires an Anthropic API key for AI-powered       │
+│  schema recommendations.                                            │
+│                                                                     │
+│  Option 1: export ANTHROPIC_API_KEY=sk-ant-xxxxx                   │
+│  Option 2: echo "ANTHROPIC_API_KEY=sk-ant-xxxxx" > .env            │
+│                                                                     │
+│  Get your API key at: https://console.anthropic.com/settings/keys  │
+╰─────────────────────────────────────────────────────────────────────╯
 ```
 
 ---
@@ -180,9 +199,10 @@ order_items        →    order_items
 - **Detailed Reasoning** — Understand *why* each decision was made
 - **Warning Detection** — Get alerts for potential issues
 
-### 🔄 Reproducible Results (v1.1.0)
+### 🔄 Reproducible Results (v1.1.0+)
 
 - **Recommendation Caching** — Same inputs = same outputs
+- **Cache Modes** — `relaxed` ignores small log changes, `strict` for precision (v1.2.0)
 - **Version Tracking** — Cache auto-invalidates when logic changes
 - **Comparison Tools** — Diff recommendations between runs
 - **Cache Control** — `--no-cache` for fresh analysis
@@ -282,6 +302,7 @@ schema-travels analyze \
     --output results.json       # Output file
     --use-ai                    # Enable AI recommendations (default)
     --no-ai                     # Use rule-based only
+    --cache-mode relaxed        # relaxed (default) or strict
     --no-cache                  # Bypass recommendation cache
     --clear-cache               # Clear all cached recommendations
 ```
@@ -448,6 +469,7 @@ ruff format src/
 - [x] Claude AI integration
 - [x] Migration simulation
 - [x] Recommendation caching (v1.1.0)
+- [x] Cache modes - relaxed/strict (v1.2.0)
 - [ ] DynamoDB support
 - [ ] Web UI dashboard
 - [ ] Real-time log streaming

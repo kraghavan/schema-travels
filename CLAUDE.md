@@ -6,14 +6,14 @@
 
 **Schema Travels** is a CLI tool that analyzes SQL database query patterns and recommends optimal NoSQL (MongoDB/DynamoDB) schema designs. It uses Claude AI for intelligent recommendations.
 
-**Current Version:** 1.1.0
+**Current Version:** 1.2.0
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         CLI (Click)                              │
-│                     schema-travels analyze                       │
+│                         CLI (Click)                             │
+│                     schema-travels analyze                      │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
         ┌─────────────┼─────────────┐
@@ -44,6 +44,30 @@
 | `persistence/` | SQLite storage | `database.py`, `repository.py` |
 | `cli/` | Command-line interface | `main.py` |
 
+## v1.2.0 Changes
+
+### Cache Modes (`--cache-mode`)
+
+```python
+class CacheMode(Enum):
+    RELAXED = "relaxed"  # Ignores small log changes (default)
+    STRICT = "strict"    # Any count change = cache miss
+```
+
+| Mode | Hash Includes | Use When |
+|------|--------------|----------|
+| `relaxed` | Join pairs, table classification (read/write heavy) | Iterating on logs, want stable results |
+| `strict` | Exact frequencies, exact ratios | Need fresh recommendations for any change |
+
+```bash
+# Use strict mode for this run only
+schema-travels analyze --cache-mode strict --logs-dir ./logs --schema-file ./schema.sql
+
+# Different modes = different cache keys (won't share cache)
+```
+
+---
+
 ## v1.1.0 Changes
 
 ### Recommendation Caching (`recommender/cache.py`)
@@ -51,10 +75,10 @@
 Ensures reproducible results by caching AI recommendations:
 
 ```python
-from schema_travels.recommender.cache import compute_input_hash, get_cache
+from schema_travels.recommender.cache import compute_input_hash, get_cache, CacheMode
 
 # Compute deterministic hash of inputs
-input_hash = compute_input_hash(schema, analysis, target)
+input_hash = compute_input_hash(schema, analysis, target, CacheMode.RELAXED)
 
 # Check cache before calling Claude
 cache = get_cache()
@@ -68,7 +92,7 @@ else:
 ```
 
 Key constants:
-- `RECOMMENDATION_VERSION = "1.0.0"` — Bump to invalidate all caches
+- `RECOMMENDATION_VERSION = "1.2.0"` — Bump to invalidate all caches
 
 ### API Key Validation (`config.py`)
 
@@ -201,6 +225,17 @@ cache.invalidate_all()
 ```
 
 Or bump `RECOMMENDATION_VERSION` in `cache.py`.
+
+Or use CLI: `schema-travels clear-cache`
+
+### Changing cache mode at runtime
+
+```bash
+# Use strict mode for this run only
+schema-travels analyze --cache-mode strict --logs-dir ./logs --schema-file ./schema.sql
+
+# Different modes = different cache keys (won't share cache)
+```
 
 ## Dependencies
 
