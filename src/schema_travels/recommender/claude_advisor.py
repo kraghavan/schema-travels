@@ -6,7 +6,7 @@ from typing import Any
 
 from anthropic import Anthropic
 
-from schema_travels.config import get_settings
+from schema_travels.config import get_settings, APIKeyNotConfiguredError
 from schema_travels.collector.models import SchemaDefinition
 from schema_travels.analyzer.models import AnalysisResult
 from schema_travels.recommender.models import (
@@ -33,16 +33,22 @@ class ClaudeAdvisor:
         Args:
             api_key: Anthropic API key (defaults to env var)
             model: Claude model to use (defaults to config)
+            
+        Raises:
+            APIKeyNotConfiguredError: If no API key is available
         """
         settings = get_settings()
+        
+        # Use provided key or get from settings
         self.api_key = api_key or settings.anthropic_api_key
         self.model = model or settings.anthropic_model
 
-        if not self.api_key:
-            raise ValueError(
-                "Anthropic API key not configured. "
-                "Set ANTHROPIC_API_KEY environment variable."
-            )
+        # Validate API key - raise clear error if missing
+        if not self.api_key or self.api_key.strip() == "":
+            raise APIKeyNotConfiguredError()
+        
+        if self.api_key in ("your-api-key-here", "sk-ant-xxxxx"):
+            raise APIKeyNotConfiguredError()
 
         self.client = Anthropic(api_key=self.api_key)
 
