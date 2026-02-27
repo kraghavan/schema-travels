@@ -30,5 +30,6 @@ src/schema_travels/py.typed
 src/schema_travels_ai.egg-info/
 dist/
 .coverage
-test_*/*
+test_run*/*
 report*.json
+todo-release/*

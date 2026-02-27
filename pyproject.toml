@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "schema-travels"
-version = "1.1.0"
+version = "1.2.0"
 description = "Intelligent SQL to NoSQL schema migration - analyzes query patterns to recommend optimal MongoDB schema design"
 readme = "README.md"
 license = {text = "MIT"}

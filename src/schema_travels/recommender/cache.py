@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -22,30 +23,70 @@ from schema_travels.recommender.models import SchemaRecommendation, TargetDataba
 logger = logging.getLogger(__name__)
 
 # Bump this when recommendation logic changes significantly
-RECOMMENDATION_VERSION = "1.0.0"
+RECOMMENDATION_VERSION = "1.2.0"
+
+
+class CacheMode(Enum):
+    """Cache invalidation strategy."""
+    
+    STRICT = "strict"
+    """
+    Strict mode: Cache invalidates on ANY change in query patterns.
+    - Exact join frequencies matter
+    - Exact write ratios matter
+    - 2 extra log lines = cache miss
+    
+    Use when: You want fresh recommendations for any data change.
+    """
+    
+    RELAXED = "relaxed"
+    """
+    Relaxed mode: Cache invalidates only on SIGNIFICANT pattern changes.
+    - Which tables join matters, not how often
+    - Table classification (read-heavy vs write-heavy) matters, not exact ratios
+    - 2 extra log lines = cache hit (same patterns)
+    
+    Use when: You're iterating on logs and want stable recommendations.
+    """
 
 
 def compute_input_hash(
     schema: SchemaDefinition,
     analysis: AnalysisResult,
     target: TargetDatabase,
+    mode: CacheMode = CacheMode.RELAXED,
 ) -> str:
     """
     Compute a deterministic hash of inputs.
-    
-    Same schema + analysis + target = same hash = can use cached recommendation.
     
     Args:
         schema: Source schema definition
         analysis: Analysis result
         target: Target database type
+        mode: Cache mode (strict or relaxed)
         
     Returns:
         SHA256 hash string (first 16 chars)
     """
-    # Build deterministic representation
+    if mode == CacheMode.STRICT:
+        return _compute_strict_hash(schema, analysis, target)
+    else:
+        return _compute_relaxed_hash(schema, analysis, target)
+
+
+def _compute_strict_hash(
+    schema: SchemaDefinition,
+    analysis: AnalysisResult,
+    target: TargetDatabase,
+) -> str:
+    """
+    Strict hash: includes exact frequencies and ratios.
+    
+    Any change in log counts = different hash = cache miss.
+    """
     data = {
         "version": RECOMMENDATION_VERSION,
+        "mode": "strict",
         "target": target.value,
         "tables": sorted([
             {
@@ -59,23 +100,92 @@ def compute_input_hash(
             f"{fk.from_table}.{fk.from_columns[0]}->{fk.to_table}.{fk.to_columns[0]}"
             for fk in schema.foreign_keys
         ]),
+        # Exact counts - strict!
         "join_patterns": sorted([
             {
                 "tables": tuple(sorted([jp.left_table, jp.right_table])),
                 "frequency": jp.frequency,
             }
-            for jp in analysis.join_patterns[:20]  # Top 20 for stability
+            for jp in analysis.join_patterns[:20]
         ], key=lambda x: x["tables"]),
         "mutation_patterns": sorted([
             {
                 "table": mp.table,
-                "write_ratio": round(mp.write_ratio, 2),  # Round for stability
+                "write_ratio": round(mp.write_ratio, 2),
             }
             for mp in analysis.mutation_patterns
         ], key=lambda x: x["table"]),
     }
     
-    # Compute hash
+    json_str = json.dumps(data, sort_keys=True)
+    hash_obj = hashlib.sha256(json_str.encode())
+    return hash_obj.hexdigest()[:16]
+
+
+def _compute_relaxed_hash(
+    schema: SchemaDefinition,
+    analysis: AnalysisResult,
+    target: TargetDatabase,
+) -> str:
+    """
+    Relaxed hash: pattern shape only, ignores exact counts.
+    
+    Only invalidates when:
+    - Schema structure changes
+    - New join pairs discovered
+    - Table classification changes (read-heavy <-> write-heavy)
+    """
+    # Classify tables by access pattern (thresholds, not exact values)
+    write_heavy = sorted([
+        mp.table for mp in analysis.mutation_patterns 
+        if mp.write_ratio > 0.4  # >40% writes = write-heavy
+    ])
+    read_heavy = sorted([
+        mp.table for mp in analysis.mutation_patterns 
+        if mp.write_ratio < 0.2  # <20% writes = read-heavy
+    ])
+    
+    # Get join pairs (WHICH tables join, not how often)
+    join_pairs = sorted(set([
+        tuple(sorted([jp.left_table, jp.right_table]))
+        for jp in analysis.join_patterns
+    ]))
+    
+    # Get "hot" joins (top joins by relative ranking, not absolute count)
+    top_joins = sorted(
+        analysis.join_patterns,
+        key=lambda jp: jp.frequency,
+        reverse=True
+    )[:10]
+    hot_join_pairs = sorted(set([
+        tuple(sorted([jp.left_table, jp.right_table]))
+        for jp in top_joins
+    ]))
+    
+    data = {
+        "version": RECOMMENDATION_VERSION,
+        "mode": "relaxed",
+        "target": target.value,
+        # Schema structure
+        "tables": sorted([
+            {
+                "name": t.name,
+                "columns": sorted([c.name for c in t.columns]),
+                "pk": sorted(t.primary_key),
+            }
+            for t in schema.tables
+        ], key=lambda x: x["name"]),
+        "foreign_keys": sorted([
+            f"{fk.from_table}.{fk.from_columns[0]}->{fk.to_table}.{fk.to_columns[0]}"
+            for fk in schema.foreign_keys
+        ]),
+        # Pattern SHAPE (not exact counts)
+        "join_pairs": [list(jp) for jp in join_pairs],
+        "hot_join_pairs": [list(jp) for jp in hot_join_pairs],
+        "write_heavy_tables": write_heavy,
+        "read_heavy_tables": read_heavy,
+    }
+    
     json_str = json.dumps(data, sort_keys=True)
     hash_obj = hashlib.sha256(json_str.encode())
     return hash_obj.hexdigest()[:16]
