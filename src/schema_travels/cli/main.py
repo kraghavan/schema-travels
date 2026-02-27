@@ -13,11 +13,12 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from schema_travels import __version__
-from schema_travels.config import get_settings
+from schema_travels.config import get_settings, APIKeyNotConfiguredError
 from schema_travels.collector import PostgresLogParser, MySQLLogParser, SchemaParser
 from schema_travels.analyzer import PatternAnalyzer
 from schema_travels.recommender import ClaudeAdvisor, SchemaGenerator
 from schema_travels.recommender.models import TargetDatabase
+from schema_travels.recommender.cache import compute_input_hash, get_cache
 from schema_travels.simulator import MigrationSimulator, SimulationConfig
 from schema_travels.persistence import Database, AnalysisRepository
 
@@ -81,6 +82,18 @@ def cli(verbose: bool) -> None:
     default=True,
     help="Use Claude AI for recommendations",
 )
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="Bypass recommendation cache and get fresh AI analysis",
+)
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Clear all cached recommendations before running",
+)
 def analyze(
     logs_dir: Path,
     schema_file: Path,
@@ -88,14 +101,25 @@ def analyze(
     target: str,
     output: Path | None,
     use_ai: bool,
+    no_cache: bool,
+    clear_cache: bool,
 ) -> None:
     """Analyze database access patterns and generate recommendations.
 
     Parses query logs and schema to identify hot joins, mutation patterns,
     and co-access patterns. Generates recommendations for NoSQL schema design.
+    
+    Use --no-cache to bypass cached recommendations and get fresh AI analysis.
+    Use --clear-cache to invalidate all cached recommendations.
     """
     analysis_id = str(uuid.uuid4())[:8]
     target_db = TargetDatabase(target)
+    
+    # Handle cache clearing
+    cache = get_cache()
+    if clear_cache:
+        count = cache.invalidate_all()
+        console.print(f"[yellow]Cleared {count} cached recommendations[/yellow]")
 
     console.print(Panel.fit(
         f"[bold blue]Schema Travels Analysis[/bold blue]\n"
@@ -149,51 +173,128 @@ def analyze(
 
             # Get recommendations
             recommendations = []
+            cache_used = False
+            valid_recs = []  # Initialize here for use later
+            
             if use_ai:
                 settings = get_settings()
-                if settings.validate_api_key():
-                    task = progress.add_task("Getting AI recommendations...", total=None)
-                    advisor = ClaudeAdvisor()
-                    recommendations = advisor.get_recommendations(
-                        schema, result, target_db
-                    )
-                    progress.update(task, completed=True)
-                else:
+                
+                # Check if API key is configured
+                if not settings.has_api_key():
                     console.print("[yellow]⚠ API key not configured, using rule-based recommendations[/yellow]")
+                    console.print("[dim]  Set ANTHROPIC_API_KEY or use --no-ai flag[/dim]")
                     recommendations = analyzer.get_embedding_recommendations(result)
+                else:
+                    # Compute input hash for cache lookup
+                    input_hash = compute_input_hash(schema, result, target_db)
+                    
+                    # Check cache first (unless --no-cache)
+                    if not no_cache:
+                        task = progress.add_task("Checking recommendation cache...", total=None)
+                        cached_recs = cache.get(input_hash)
+                        progress.update(task, completed=True)
+                        
+                        if cached_recs:
+                            recommendations = cached_recs
+                            cache_used = True
+                            console.print(f"  [green]✓ Using cached recommendations[/green] [dim](hash: {input_hash})[/dim]")
+                    
+                    # If not cached, call Claude API
+                    if not recommendations:
+                        try:
+                            task = progress.add_task("Getting AI recommendations...", total=None)
+                            advisor = ClaudeAdvisor()
+                            recommendations = advisor.get_recommendations(
+                                schema, result, target_db
+                            )
+                            progress.update(task, completed=True)
+                            
+                            # Cache the recommendations
+                            cache.put(input_hash, recommendations, metadata={
+                                "analysis_id": analysis_id,
+                                "logs_dir": str(logs_dir),
+                                "schema_file": str(schema_file),
+                            })
+                            console.print(f"  [dim]Cached recommendations (hash: {input_hash})[/dim]")
+                            
+                        except APIKeyNotConfiguredError as e:
+                            console.print(e.message)
+                            sys.exit(1)
             else:
                 recommendations = analyzer.get_embedding_recommendations(result)
 
             # Save recommendations
             if recommendations:
                 from schema_travels.recommender.models import SchemaRecommendation, RelationshipDecision
-                schema_recs = [
-                    SchemaRecommendation(
-                        parent_table=r.get("parent_table", r["parent_table"]) if isinstance(r, dict) else r.parent_table,
-                        child_table=r.get("child_table", r["child_table"]) if isinstance(r, dict) else r.child_table,
-                        decision=RelationshipDecision(r.get("decision", "reference")) if isinstance(r, dict) else r.decision,
-                        confidence=r.get("confidence", 0.5) if isinstance(r, dict) else r.confidence,
-                        reasoning=r.get("reasoning", []) if isinstance(r, dict) else r.reasoning,
-                        warnings=r.get("warnings", []) if isinstance(r, dict) else r.warnings,
-                    )
-                    for r in recommendations
+                
+                def to_schema_rec(r):
+                    """Convert various recommendation formats to SchemaRecommendation."""
+                    if isinstance(r, SchemaRecommendation):
+                        return r
+                    elif isinstance(r, dict):
+                        # Handle decision - could be string or enum
+                        decision = r.get("decision", "reference")
+                        if isinstance(decision, str):
+                            # Normalize string to enum
+                            try:
+                                decision = RelationshipDecision(decision.lower())
+                            except ValueError:
+                                decision = RelationshipDecision.REFERENCE
+                        return SchemaRecommendation(
+                            parent_table=r.get("parent_table", "") or "",
+                            child_table=r.get("child_table", "") or "",
+                            decision=decision,
+                            confidence=r.get("confidence", 0.5) or 0.5,
+                            reasoning=r.get("reasoning", []) or [],
+                            warnings=r.get("warnings", []) or [],
+                        )
+                    else:
+                        # Object with attributes
+                        decision = r.decision
+                        if isinstance(decision, str):
+                            try:
+                                decision = RelationshipDecision(decision.lower())
+                            except ValueError:
+                                decision = RelationshipDecision.REFERENCE
+                        return SchemaRecommendation(
+                            parent_table=r.parent_table or "",
+                            child_table=r.child_table or "",
+                            decision=decision,
+                            confidence=r.confidence if hasattr(r, 'confidence') else 0.5,
+                            reasoning=r.reasoning if hasattr(r, 'reasoning') else [],
+                            warnings=r.warnings if hasattr(r, 'warnings') else [],
+                        )
+                
+                schema_recs = [to_schema_rec(r) for r in recommendations]
+                
+                # Filter out invalid recommendations (must have both parent and child tables)
+                valid_recs = [
+                    r for r in schema_recs 
+                    if r.parent_table and r.child_table
                 ]
-                repo.save_recommendations(analysis_id, schema_recs)
+                
+                if valid_recs:
+                    repo.save_recommendations(analysis_id, valid_recs)
+                    if len(valid_recs) < len(schema_recs):
+                        console.print(f"  [yellow]Filtered {len(schema_recs) - len(valid_recs)} invalid recommendations[/yellow]")
+                else:
+                    console.print("  [yellow]No valid recommendations to save[/yellow]")
 
             # Generate target schema
             task = progress.add_task("Generating target schema...", total=None)
-            generator = SchemaGenerator(schema, result, schema_recs if recommendations else [])
+            generator = SchemaGenerator(schema, result, valid_recs)
             target_schema = generator.generate(target_db)
             repo.save_target_schema(analysis_id, target_schema)
             progress.update(task, completed=True)
 
         # Display results
-        _display_analysis_summary(result, recommendations, target_schema)
+        _display_analysis_summary(result, recommendations, target_schema, cache_used)
 
         # Save to file if requested
         if output:
             output_data = {
                 "analysis_id": analysis_id,
+                "cache_used": cache_used,
                 "analysis": result.to_dict(),
                 "recommendations": [r.to_dict() if hasattr(r, 'to_dict') else r for r in recommendations],
                 "target_schema": target_schema.to_dict(),
@@ -204,6 +305,8 @@ def analyze(
 
         console.print(f"\n[bold green]✓ Analysis complete![/bold green]")
         console.print(f"  Analysis ID: {analysis_id}")
+        if cache_used:
+            console.print(f"  [dim]Used cached recommendations. Run with --no-cache for fresh analysis.[/dim]")
         console.print(f"  View report: schema-travels report --analysis-id {analysis_id}")
 
     except Exception as e:
@@ -380,17 +483,36 @@ def config() -> None:
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
-    table.add_row("API Key", "✓ Configured" if settings.validate_api_key() else "✗ Not set")
+    table.add_row("API Key", "✓ Configured" if settings.has_api_key() else "✗ Not set")
     table.add_row("Model", settings.anthropic_model)
     table.add_row("Database", str(settings.db_path))
+    table.add_row("Cache Dir", str(settings.db_path.parent / "cache"))
     table.add_row("Default Target", settings.default_target)
     table.add_row("Default DB Type", settings.default_db_type)
     table.add_row("Log Level", settings.log_level)
 
     console.print(table)
+    
+    # Show cache stats
+    cache = get_cache()
+    entries = cache.list_entries()
+    console.print(f"\n[dim]Cached recommendations: {len(entries)}[/dim]")
 
 
-def _display_analysis_summary(result, recommendations, target_schema) -> None:
+@cli.command("clear-cache")
+@click.confirmation_option(prompt="Are you sure you want to clear all cached recommendations?")
+def clear_cache_cmd() -> None:
+    """Clear all cached recommendations.
+
+    Remove all cached AI recommendations. Next analysis will
+    fetch fresh recommendations from Claude.
+    """
+    cache = get_cache()
+    count = cache.invalidate_all()
+    console.print(f"[green]Cleared {count} cached recommendations[/green]")
+
+
+def _display_analysis_summary(result, recommendations, target_schema, cache_used: bool = False) -> None:
     """Display analysis summary in console."""
     console.print("\n")
 
@@ -437,7 +559,10 @@ def _display_analysis_summary(result, recommendations, target_schema) -> None:
     # Recommendations
     if recommendations:
         console.print("\n")
-        table = Table(title="💡 Schema Recommendations")
+        title = "💡 Schema Recommendations"
+        if cache_used:
+            title += " [dim](cached)[/dim]"
+        table = Table(title=title)
         table.add_column("Relationship", style="cyan")
         table.add_column("Decision", style="green")
         table.add_column("Confidence", justify="right")
@@ -459,7 +584,7 @@ def _display_analysis_summary(result, recommendations, target_schema) -> None:
 
             table.add_row(
                 f"{parent} → {child}",
-                decision.upper(),
+                decision.upper() if isinstance(decision, str) else str(decision).upper(),
                 f"{confidence:.0%}",
                 reasoning[0] if reasoning else "",
             )

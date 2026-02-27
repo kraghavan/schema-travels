@@ -31,3 +31,4 @@ src/schema_travels_ai.egg-info/
 dist/
 .coverage
 test_*/*
+report*.json

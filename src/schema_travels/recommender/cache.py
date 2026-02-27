@@ -158,18 +158,31 @@ class RecommendationCache:
             with open(cache_file) as f:
                 data = json.load(f)
             
-            recommendations = [
-                SchemaRecommendation(
-                    parent_table=r["parent_table"],
-                    child_table=r["child_table"],
-                    decision=r["decision"],
-                    confidence=r["confidence"],
-                    reasoning=r["reasoning"],
-                    warnings=r["warnings"],
-                    metrics=r.get("metrics", {}),
+            # Import here to avoid circular imports
+            from schema_travels.recommender.models import RelationshipDecision
+            
+            recommendations = []
+            for r in data.get("recommendations", []):
+                # Convert decision string to enum
+                decision = r["decision"]
+                if isinstance(decision, str):
+                    try:
+                        decision = RelationshipDecision(decision.lower())
+                    except ValueError:
+                        # Try uppercase
+                        decision = RelationshipDecision[decision.upper()]
+                
+                recommendations.append(
+                    SchemaRecommendation(
+                        parent_table=r["parent_table"],
+                        child_table=r["child_table"],
+                        decision=decision,
+                        confidence=r["confidence"],
+                        reasoning=r["reasoning"],
+                        warnings=r["warnings"],
+                        metrics=r.get("metrics", {}),
+                    )
                 )
-                for r in data.get("recommendations", [])
-            ]
             
             logger.info(f"Cache hit: {input_hash} ({len(recommendations)} recommendations)")
             return recommendations
