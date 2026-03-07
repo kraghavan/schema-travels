@@ -38,9 +38,52 @@ The right answer depends on **how you actually access your data**. But manually 
 
 ---
 
-## What's New in v1.2.0
+## What's New in v1.3.0
 
-### 🎛️ Cache Modes
+### 📝 Query Rewrite Examples
+
+See exactly how your SQL queries translate to MongoDB — no guessing:
+
+```bash
+# After getting recommendations, generate rewrite examples
+schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql
+```
+
+```python
+# Or use the API directly
+from schema_travels.recommender import generate_rewrites
+
+result = generate_rewrites(recommendations, min_confidence=0.8)
+for example in result.examples:
+    print(f"=== {example.relationship} ({example.decision}) ===")
+    print(f"SQL:\n{example.sql}")
+    print(f"MongoDB:\n{example.mongodb}")
+    print(f"Why: {example.explanation}\n")
+```
+
+**Example output:**
+
+```
+=== users → addresses (EMBED) ===
+
+SQL:
+SELECT p.*, c.*
+FROM users p
+JOIN addresses c ON c.users_id = p.id
+WHERE p.id = :id;
+
+MongoDB:
+// addresses are embedded inside users — single read, no join
+db.users.findOne({ _id: id })
+
+// Result already contains embedded addresses:
+// { _id: ..., ..., addresses: [ { ... }, { ... } ] }
+
+Why: Because addresses are always fetched with users and have high 
+co-access, embedding eliminates the JOIN entirely.
+```
+
+### 🎛️ Cache Modes (v1.2.0)
 
 Control how sensitive the cache is to log changes:
 
@@ -198,6 +241,13 @@ order_items        →    order_items
 - **Confidence Scores** — Know how certain each recommendation is
 - **Detailed Reasoning** — Understand *why* each decision was made
 - **Warning Detection** — Get alerts for potential issues
+
+### 📝 Query Rewrite Examples (v1.3.0+)
+
+- **SQL → MongoDB Translations** — Concrete before/after code
+- **Four Rewrite Patterns** — EMBED, REFERENCE, SEPARATE, BUCKET
+- **Instant Generation** — Rule-based templates, no API call needed
+- **Confidence Filtering** — Only generate rewrites above a threshold
 
 ### 🔄 Reproducible Results (v1.1.0+)
 
@@ -470,6 +520,7 @@ ruff format src/
 - [x] Migration simulation
 - [x] Recommendation caching (v1.1.0)
 - [x] Cache modes - relaxed/strict (v1.2.0)
+- [x] Query rewrite examples (v1.3.0)
 - [ ] DynamoDB support
 - [ ] Web UI dashboard
 - [ ] Real-time log streaming

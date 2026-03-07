@@ -23,7 +23,7 @@ from schema_travels.recommender.models import SchemaRecommendation, TargetDataba
 logger = logging.getLogger(__name__)
 
 # Bump this when recommendation logic changes significantly
-RECOMMENDATION_VERSION = "1.2.0"
+RECOMMENDATION_VERSION = "1.3.0"
 
 
 class CacheMode(Enum):
