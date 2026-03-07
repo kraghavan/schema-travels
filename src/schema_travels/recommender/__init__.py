@@ -16,6 +16,11 @@ from schema_travels.recommender.cache import (
     CacheMode,
     RECOMMENDATION_VERSION,
 )
+from schema_travels.recommender.query_rewriter import (
+    generate_rewrites,
+    QueryRewriteExample,
+    RewriteResult,
+)
 
 __all__ = [
     "ClaudeAdvisor",
@@ -30,4 +35,7 @@ __all__ = [
     "RecommendationCache",
     "CacheMode",
     "RECOMMENDATION_VERSION",
+    "generate_rewrites",
+    "QueryRewriteExample",
+    "RewriteResult",
 ]

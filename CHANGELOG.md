@@ -14,6 +14,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2025-03-07
+
+### Added
+- **Query Rewrite Examples** (`--show-rewrites`)
+  - Automatic SQL → MongoDB query rewrite generation
+  - Rule-based templates for each relationship decision
+  - Shows concrete before/after code for developers
+  - No API call required — instant, deterministic output
+
+- **Four Rewrite Patterns**
+  - `EMBED`: JOIN → embedded document lookup (`findOne`)
+  - `REFERENCE`: JOIN → two-query pattern or `$lookup` aggregation
+  - `SEPARATE`: Independent queries with index recommendations
+  - `BUCKET`: Time-series bucketing pattern for high-volume data
+
+- **Confidence Threshold** (`--min-confidence`)
+  - Filter recommendations below a confidence threshold
+  - Example: `--min-confidence 0.8` shows only ≥80% confidence
+  - Applies to both recommendations table and query rewrites
+
+- **Confidence Color Coding**
+  - Recommendations table now color-codes confidence scores
+  - 🟢 Green (≥85%): High confidence
+  - 🟡 Yellow (70-84%): Medium confidence  
+  - 🔴 Red (<70%): Low confidence — review carefully
+
+### Technical
+- New module: `recommender/query_rewriter.py`
+- New dataclasses: `QueryRewriteExample`, `RewriteResult`
+- New function: `generate_rewrites()` — main entry point
+- Dispatch dict `_REWRITE_DISPATCH` keyed on `RelationshipDecision` enum
+- CLI flags: `--min-confidence FLOAT`, `--show-rewrites`
+
+---
+
+## [1.2.0] - 2025-02-27
+
+### Added
+- **Cache Modes** (`--cache-mode`)
+  - `relaxed` (default): Ignores small log changes
+  - `strict`: Any change in query counts invalidates cache
+
+---
+
 ## [1.1.0] - 2025-02-26
 
 ### Added
@@ -127,7 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/kraghavan/schema-travels/compare/v1.1.0...HEAD
+[1.3.0]: https://github.com/kraghavan/schema-travels/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/kraghavan/schema-travels/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/kraghavan/schema-travels/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/kraghavan/schema-travels/releases/tag/v1.0.0
 [0.1.0]: https://github.com/kraghavan/schema-travels/releases/tag/v0.1.0

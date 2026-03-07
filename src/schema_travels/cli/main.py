@@ -100,6 +100,19 @@ def cli(verbose: bool) -> None:
     default="relaxed",
     help="Cache mode: 'relaxed' ignores small log changes, 'strict' invalidates on any change",
 )
+@click.option(
+    "--min-confidence",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    metavar="THRESHOLD",
+    help="Only show recommendations at or above this confidence (0.0–1.0). E.g. --min-confidence 0.8",
+)
+@click.option(
+    "--show-rewrites",
+    is_flag=True,
+    default=False,
+    help="Show SQL → MongoDB query rewrite examples for each recommendation",
+)
 def analyze(
     logs_dir: Path,
     schema_file: Path,
@@ -110,25 +123,39 @@ def analyze(
     no_cache: bool,
     clear_cache: bool,
     cache_mode: str,
+    min_confidence: float | None,
+    show_rewrites: bool,
 ) -> None:
     """Analyze database access patterns and generate recommendations.
 
     Parses query logs and schema to identify hot joins, mutation patterns,
     and co-access patterns. Generates recommendations for NoSQL schema design.
-    
+
     Cache modes:
-    
+
     \b
     - relaxed (default): Ignores small log changes. Cache invalidates only when
       schema changes or access patterns significantly change (new joins, tables
       flip from read-heavy to write-heavy).
-    
+
     \b
     - strict: Any change in query counts invalidates cache. Use when you want
       fresh recommendations for every data change.
-    
+
     Use --no-cache to bypass cache entirely for one run.
     Use --clear-cache to invalidate all cached recommendations.
+
+    Confidence filtering:
+
+    \b
+    Use --min-confidence 0.8 to suppress weak or uncertain recommendations.
+    Only recommendations at or above the threshold will be shown and saved.
+
+    Query rewrites:
+
+    \b
+    Use --show-rewrites to display SQL → MongoDB query rewrite examples
+    for each recommendation. Great for understanding the practical impact.
     """
     analysis_id = str(uuid.uuid4())[:8]
     target_db = TargetDatabase(target)
@@ -300,6 +327,17 @@ def analyze(
                 else:
                     console.print("  [yellow]No valid recommendations to save[/yellow]")
 
+            # Apply confidence threshold filter
+            if min_confidence is not None and valid_recs:
+                before = len(valid_recs)
+                valid_recs = [r for r in valid_recs if r.confidence >= min_confidence]
+                filtered = before - len(valid_recs)
+                if filtered:
+                    console.print(
+                        f"  [yellow]Confidence filter ({min_confidence:.0%}): "
+                        f"removed {filtered} recommendation(s) below threshold[/yellow]"
+                    )
+
             # Generate target schema
             task = progress.add_task("Generating target schema...", total=None)
             generator = SchemaGenerator(schema, result, valid_recs)
@@ -307,8 +345,21 @@ def analyze(
             repo.save_target_schema(analysis_id, target_schema)
             progress.update(task, completed=True)
 
+            # Generate query rewrite examples if requested
+            rewrite_result = None
+            if show_rewrites and valid_recs:
+                from schema_travels.recommender.query_rewriter import generate_rewrites
+                task = progress.add_task("Generating query rewrite examples...", total=None)
+                rewrite_result = generate_rewrites(valid_recs, min_confidence=min_confidence)
+                progress.update(task, completed=True)
+
         # Display results
-        _display_analysis_summary(result, recommendations, target_schema, cache_used)
+        _display_analysis_summary(
+            result, valid_recs if valid_recs else recommendations,
+            target_schema, cache_used,
+            min_confidence=min_confidence,
+            rewrite_result=rewrite_result,
+        )
 
         # Save to file if requested
         if output:
@@ -533,7 +584,14 @@ def clear_cache_cmd() -> None:
     console.print(f"[green]Cleared {count} cached recommendations[/green]")
 
 
-def _display_analysis_summary(result, recommendations, target_schema, cache_used: bool = False) -> None:
+def _display_analysis_summary(
+    result,
+    recommendations,
+    target_schema,
+    cache_used: bool = False,
+    min_confidence: float | None = None,
+    rewrite_result=None,
+) -> None:
     """Display analysis summary in console."""
     console.print("\n")
 
@@ -586,7 +644,7 @@ def _display_analysis_summary(result, recommendations, target_schema, cache_used
         table = Table(title=title)
         table.add_column("Relationship", style="cyan")
         table.add_column("Decision", style="green")
-        table.add_column("Confidence", justify="right")
+        table.add_column("Confidence", justify="right", no_wrap=True)
         table.add_column("Reasoning")
 
         for r in recommendations[:10]:
@@ -603,14 +661,56 @@ def _display_analysis_summary(result, recommendations, target_schema, cache_used
                 confidence = r.confidence
                 reasoning = r.reasoning
 
+            # Colour-code confidence: green ≥ 80%, yellow 60–79%, red < 60%
+            if confidence >= 0.8:
+                conf_str = f"[green]● {confidence:.0%} High[/green]"
+            elif confidence >= 0.6:
+                conf_str = f"[yellow]● {confidence:.0%} Medium[/yellow]"
+            else:
+                conf_str = f"[red]● {confidence:.0%} Low — review carefully[/red]"
+
             table.add_row(
                 f"{parent} → {child}",
                 decision.upper() if isinstance(decision, str) else str(decision).upper(),
-                f"{confidence:.0%}",
+                conf_str,
                 reasoning[0] if reasoning else "",
             )
 
         console.print(table)
+
+        # Confidence filter note
+        if min_confidence is not None:
+            console.print(
+                f"  [dim]Showing recommendations with confidence ≥ {min_confidence:.0%}. "
+                f"Remove --min-confidence to see all.[/dim]"
+            )
+
+    # Query rewrite examples
+    if rewrite_result and rewrite_result.examples:
+        from rich.syntax import Syntax
+        console.print("\n")
+        console.print("[bold]🔄 Query Rewrite Examples[/bold]")
+        console.print("[dim]SQL → MongoDB translation for each recommendation[/dim]\n")
+
+        for ex in rewrite_result.examples:
+            console.print(Panel.fit(
+                f"[bold cyan]{ex.relationship}[/bold cyan]  "
+                f"[green]{ex.decision}[/green]\n"
+                f"[dim]{ex.scenario}[/dim]",
+                title="Rewrite",
+            ))
+
+            console.print("[yellow]SQL (before):[/yellow]")
+            console.print(Syntax(ex.sql, "sql", theme="monokai", line_numbers=False))
+
+            console.print("[yellow]MongoDB (after):[/yellow]")
+            console.print(Syntax(ex.mongodb, "javascript", theme="monokai", line_numbers=False))
+
+            console.print(f"[dim]💡 {ex.explanation}[/dim]\n")
+
+        if rewrite_result.errors:
+            for err in rewrite_result.errors:
+                console.print(f"  [yellow]⚠ {err}[/yellow]")
 
 
 def _print_text_report(analysis, result, recommendations, target_schema) -> None:

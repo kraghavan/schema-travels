@@ -6,7 +6,7 @@
 
 **Schema Travels** is a CLI tool that analyzes SQL database query patterns and recommends optimal NoSQL (MongoDB/DynamoDB) schema designs. It uses Claude AI for intelligent recommendations.
 
-**Current Version:** 1.2.0
+**Current Version:** 1.3.0
 
 ## Architecture
 
@@ -44,7 +44,7 @@
 | `persistence/` | SQLite storage | `database.py`, `repository.py` |
 | `cli/` | Command-line interface | `main.py` |
 
-## v1.2.0 Changes
+## v1.3.0 Changes
 
 ### Cache Modes (`--cache-mode`)
 
@@ -92,7 +92,7 @@ else:
 ```
 
 Key constants:
-- `RECOMMENDATION_VERSION = "1.2.0"` — Bump to invalidate all caches
+- `RECOMMENDATION_VERSION = "1.3.0"` — Bump to invalidate all caches
 
 ### API Key Validation (`config.py`)
 

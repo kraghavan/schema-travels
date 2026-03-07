@@ -148,6 +148,7 @@ flowchart TB
 | `claude_advisor.py` | AI recommendations via Claude API |
 | `schema_generator.py` | Generate MongoDB/DynamoDB schemas |
 | `cache.py` | **v1.1.0** - Hash-based recommendation caching |
+| `query_rewriter.py` | **v1.3.0** - SQL → MongoDB query rewrite examples |
 | `models.py` | Recommendation data models |
 
 ### Simulator (`simulator/`)
