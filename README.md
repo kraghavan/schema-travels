@@ -40,13 +40,13 @@ The right answer depends on **how you actually access your data**. But manually 
 
 ## What's New in v1.3.0
 
-### 📝 Query Rewrite Examples
+### 📝 Query Rewrite Examples (`--show-rewrites`)
 
 See exactly how your SQL queries translate to MongoDB — no guessing:
 
 ```bash
-# After getting recommendations, generate rewrite examples
-schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql
+# Show query rewrite examples alongside recommendations
+schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql --show-rewrites
 ```
 
 ```python
@@ -82,6 +82,35 @@ db.users.findOne({ _id: id })
 Why: Because addresses are always fetched with users and have high 
 co-access, embedding eliminates the JOIN entirely.
 ```
+
+### 🎯 Confidence Threshold (`--min-confidence`)
+
+Filter out low-confidence recommendations:
+
+```bash
+# Only show recommendations with ≥80% confidence
+schema-travels analyze --logs-dir ./logs --schema-file ./schema.sql --min-confidence 0.8
+```
+
+### 🎨 Confidence Color Coding
+
+Recommendations table now highlights confidence levels:
+
+```
+💡 Schema Recommendations
+┌─────────────────┬───────────┬────────────┬─────────────────────────┐
+│ Relationship    │ Decision  │ Confidence │ Reasoning               │
+├─────────────────┼───────────┼────────────┼─────────────────────────┤
+│ users → addr    │ EMBED     │ 92%        │ 92% co-access ratio     │  ← 🟢 Green
+│ orders → items  │ EMBED     │ 87%        │ Always fetched together │  ← 🟢 Green
+│ users → orders  │ REFERENCE │ 78%        │ Independent access      │  ← 🟡 Yellow
+│ products → logs │ SEPARATE  │ 65%        │ High write volume       │  ← 🔴 Red
+└─────────────────┴───────────┴────────────┴─────────────────────────┘
+```
+
+- 🟢 **Green (≥85%)**: High confidence — safe to follow
+- 🟡 **Yellow (70-84%)**: Medium confidence — review reasoning
+- 🔴 **Red (<70%)**: Low confidence — investigate further
 
 ### 🎛️ Cache Modes (v1.2.0)
 
@@ -244,10 +273,11 @@ order_items        →    order_items
 
 ### 📝 Query Rewrite Examples (v1.3.0+)
 
-- **SQL → MongoDB Translations** — Concrete before/after code
+- **SQL → MongoDB Translations** — Concrete before/after code (`--show-rewrites`)
 - **Four Rewrite Patterns** — EMBED, REFERENCE, SEPARATE, BUCKET
 - **Instant Generation** — Rule-based templates, no API call needed
-- **Confidence Filtering** — Only generate rewrites above a threshold
+- **Confidence Threshold** — Filter low-confidence recommendations (`--min-confidence`)
+- **Color-Coded Confidence** — Green/yellow/red highlighting in recommendations table
 
 ### 🔄 Reproducible Results (v1.1.0+)
 
@@ -355,6 +385,8 @@ schema-travels analyze \
     --cache-mode relaxed        # relaxed (default) or strict
     --no-cache                  # Bypass recommendation cache
     --clear-cache               # Clear all cached recommendations
+    --min-confidence 0.8        # Only show recommendations ≥80% confidence
+    --show-rewrites             # Display SQL → MongoDB query rewrite examples
 ```
 
 ---

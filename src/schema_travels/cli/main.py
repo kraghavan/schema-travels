@@ -16,7 +16,7 @@ from schema_travels import __version__
 from schema_travels.config import get_settings, APIKeyNotConfiguredError
 from schema_travels.collector import PostgresLogParser, MySQLLogParser, SchemaParser
 from schema_travels.analyzer import PatternAnalyzer
-from schema_travels.recommender import ClaudeAdvisor, SchemaGenerator
+from schema_travels.recommender import ClaudeAdvisor, SchemaGenerator, generate_rewrites
 from schema_travels.recommender.models import TargetDatabase
 from schema_travels.recommender.cache import compute_input_hash, get_cache, CacheMode
 from schema_travels.simulator import MigrationSimulator, SimulationConfig
@@ -102,16 +102,15 @@ def cli(verbose: bool) -> None:
 )
 @click.option(
     "--min-confidence",
-    type=click.FloatRange(0.0, 1.0),
+    type=float,
     default=None,
-    metavar="THRESHOLD",
-    help="Only show recommendations at or above this confidence (0.0–1.0). E.g. --min-confidence 0.8",
+    help="Only show recommendations at or above this confidence threshold (0.0-1.0)",
 )
 @click.option(
     "--show-rewrites",
     is_flag=True,
     default=False,
-    help="Show SQL → MongoDB query rewrite examples for each recommendation",
+    help="Display SQL → MongoDB query rewrite examples for each recommendation",
 )
 def analyze(
     logs_dir: Path,
@@ -130,32 +129,20 @@ def analyze(
 
     Parses query logs and schema to identify hot joins, mutation patterns,
     and co-access patterns. Generates recommendations for NoSQL schema design.
-
+    
     Cache modes:
-
+    
     \b
     - relaxed (default): Ignores small log changes. Cache invalidates only when
       schema changes or access patterns significantly change (new joins, tables
       flip from read-heavy to write-heavy).
-
+    
     \b
     - strict: Any change in query counts invalidates cache. Use when you want
       fresh recommendations for every data change.
-
+    
     Use --no-cache to bypass cache entirely for one run.
     Use --clear-cache to invalidate all cached recommendations.
-
-    Confidence filtering:
-
-    \b
-    Use --min-confidence 0.8 to suppress weak or uncertain recommendations.
-    Only recommendations at or above the threshold will be shown and saved.
-
-    Query rewrites:
-
-    \b
-    Use --show-rewrites to display SQL → MongoDB query rewrite examples
-    for each recommendation. Great for understanding the practical impact.
     """
     analysis_id = str(uuid.uuid4())[:8]
     target_db = TargetDatabase(target)
@@ -327,17 +314,6 @@ def analyze(
                 else:
                     console.print("  [yellow]No valid recommendations to save[/yellow]")
 
-            # Apply confidence threshold filter
-            if min_confidence is not None and valid_recs:
-                before = len(valid_recs)
-                valid_recs = [r for r in valid_recs if r.confidence >= min_confidence]
-                filtered = before - len(valid_recs)
-                if filtered:
-                    console.print(
-                        f"  [yellow]Confidence filter ({min_confidence:.0%}): "
-                        f"removed {filtered} recommendation(s) below threshold[/yellow]"
-                    )
-
             # Generate target schema
             task = progress.add_task("Generating target schema...", total=None)
             generator = SchemaGenerator(schema, result, valid_recs)
@@ -345,20 +321,12 @@ def analyze(
             repo.save_target_schema(analysis_id, target_schema)
             progress.update(task, completed=True)
 
-            # Generate query rewrite examples if requested
-            rewrite_result = None
-            if show_rewrites and valid_recs:
-                from schema_travels.recommender.query_rewriter import generate_rewrites
-                task = progress.add_task("Generating query rewrite examples...", total=None)
-                rewrite_result = generate_rewrites(valid_recs, min_confidence=min_confidence)
-                progress.update(task, completed=True)
-
         # Display results
         _display_analysis_summary(
-            result, valid_recs if valid_recs else recommendations,
-            target_schema, cache_used,
+            result, recommendations, target_schema, 
+            cache_used=cache_used,
             min_confidence=min_confidence,
-            rewrite_result=rewrite_result,
+            show_rewrites=show_rewrites,
         )
 
         # Save to file if requested
@@ -584,13 +552,23 @@ def clear_cache_cmd() -> None:
     console.print(f"[green]Cleared {count} cached recommendations[/green]")
 
 
+def _confidence_color(confidence: float) -> str:
+    """Return Rich color markup based on confidence level."""
+    if confidence >= 0.85:
+        return "green"
+    elif confidence >= 0.70:
+        return "yellow"
+    else:
+        return "red"
+
+
 def _display_analysis_summary(
-    result,
-    recommendations,
-    target_schema,
+    result, 
+    recommendations, 
+    target_schema, 
     cache_used: bool = False,
     min_confidence: float | None = None,
-    rewrite_result=None,
+    show_rewrites: bool = False,
 ) -> None:
     """Display analysis summary in console."""
     console.print("\n")
@@ -637,17 +615,11 @@ def _display_analysis_summary(
 
     # Recommendations
     if recommendations:
-        console.print("\n")
-        title = "💡 Schema Recommendations"
-        if cache_used:
-            title += " [dim](cached)[/dim]"
-        table = Table(title=title)
-        table.add_column("Relationship", style="cyan")
-        table.add_column("Decision", style="green")
-        table.add_column("Confidence", justify="right", no_wrap=True)
-        table.add_column("Reasoning")
-
-        for r in recommendations[:10]:
+        # Convert to consistent format and filter by confidence
+        from schema_travels.recommender.models import SchemaRecommendation, RelationshipDecision
+        
+        filtered_recs = []
+        for r in recommendations:
             if isinstance(r, dict):
                 parent = r.get("parent_table", "")
                 child = r.get("child_table", "")
@@ -660,57 +632,91 @@ def _display_analysis_summary(
                 decision = r.decision.value if hasattr(r.decision, 'value') else r.decision
                 confidence = r.confidence
                 reasoning = r.reasoning
+            
+            # Apply min_confidence filter
+            if min_confidence is not None and confidence < min_confidence:
+                continue
+                
+            filtered_recs.append({
+                "parent": parent,
+                "child": child,
+                "decision": decision,
+                "confidence": confidence,
+                "reasoning": reasoning,
+            })
+        
+        console.print("\n")
+        title = "💡 Schema Recommendations"
+        if cache_used:
+            title += " [dim](cached)[/dim]"
+        if min_confidence is not None:
+            title += f" [dim](≥{min_confidence:.0%} confidence)[/dim]"
+        table = Table(title=title)
+        table.add_column("Relationship", style="cyan")
+        table.add_column("Decision", style="green")
+        table.add_column("Confidence", justify="right")
+        table.add_column("Reasoning")
 
-            # Colour-code confidence: green ≥ 80%, yellow 60–79%, red < 60%
-            if confidence >= 0.8:
-                conf_str = f"[green]● {confidence:.0%} High[/green]"
-            elif confidence >= 0.6:
-                conf_str = f"[yellow]● {confidence:.0%} Medium[/yellow]"
-            else:
-                conf_str = f"[red]● {confidence:.0%} Low — review carefully[/red]"
-
+        for r in filtered_recs[:10]:
+            color = _confidence_color(r["confidence"])
+            decision_str = r["decision"].upper() if isinstance(r["decision"], str) else str(r["decision"]).upper()
             table.add_row(
-                f"{parent} → {child}",
-                decision.upper() if isinstance(decision, str) else str(decision).upper(),
-                conf_str,
-                reasoning[0] if reasoning else "",
+                f"{r['parent']} → {r['child']}",
+                decision_str,
+                f"[{color}]{r['confidence']:.0%}[/{color}]",
+                r["reasoning"][0] if r["reasoning"] else "",
             )
 
         console.print(table)
-
-        # Confidence filter note
-        if min_confidence is not None:
-            console.print(
-                f"  [dim]Showing recommendations with confidence ≥ {min_confidence:.0%}. "
-                f"Remove --min-confidence to see all.[/dim]"
-            )
-
-    # Query rewrite examples
-    if rewrite_result and rewrite_result.examples:
-        from rich.syntax import Syntax
-        console.print("\n")
-        console.print("[bold]🔄 Query Rewrite Examples[/bold]")
-        console.print("[dim]SQL → MongoDB translation for each recommendation[/dim]\n")
-
-        for ex in rewrite_result.examples:
+        
+        if min_confidence is not None and len(filtered_recs) < len(recommendations):
+            console.print(f"  [dim]({len(recommendations) - len(filtered_recs)} recommendations below {min_confidence:.0%} confidence hidden)[/dim]")
+        
+        # Show query rewrites if requested
+        if show_rewrites and filtered_recs:
+            console.print("\n")
             console.print(Panel.fit(
-                f"[bold cyan]{ex.relationship}[/bold cyan]  "
-                f"[green]{ex.decision}[/green]\n"
-                f"[dim]{ex.scenario}[/dim]",
-                title="Rewrite",
+                "[bold]📝 SQL → MongoDB Query Rewrites[/bold]",
+                title="Query Examples",
             ))
-
-            console.print("[yellow]SQL (before):[/yellow]")
-            console.print(Syntax(ex.sql, "sql", theme="monokai", line_numbers=False))
-
-            console.print("[yellow]MongoDB (after):[/yellow]")
-            console.print(Syntax(ex.mongodb, "javascript", theme="monokai", line_numbers=False))
-
-            console.print(f"[dim]💡 {ex.explanation}[/dim]\n")
-
-        if rewrite_result.errors:
-            for err in rewrite_result.errors:
-                console.print(f"  [yellow]⚠ {err}[/yellow]")
+            
+            # Convert filtered_recs back to SchemaRecommendation for generate_rewrites
+            schema_recs_for_rewrite = []
+            for r in filtered_recs:
+                decision = r["decision"]
+                if isinstance(decision, str):
+                    try:
+                        decision = RelationshipDecision(decision.lower())
+                    except ValueError:
+                        decision = RelationshipDecision.REFERENCE
+                schema_recs_for_rewrite.append(SchemaRecommendation(
+                    parent_table=r["parent"],
+                    child_table=r["child"],
+                    decision=decision,
+                    confidence=r["confidence"],
+                    reasoning=r["reasoning"],
+                    warnings=[],
+                ))
+            
+            rewrite_result = generate_rewrites(schema_recs_for_rewrite)
+            
+            for example in rewrite_result.examples:
+                color = "green" if example.decision == "EMBED" else (
+                    "blue" if example.decision == "REFERENCE" else (
+                    "yellow" if example.decision == "SEPARATE" else "magenta"
+                ))
+                console.print(f"\n[bold {color}]━━━ {example.relationship} ({example.decision}) ━━━[/bold {color}]")
+                console.print(f"[dim]Scenario:[/dim] {example.scenario}\n")
+                console.print("[bold]SQL:[/bold]")
+                console.print(Panel(example.sql, border_style="dim"))
+                console.print("[bold]MongoDB:[/bold]")
+                console.print(Panel(example.mongodb, border_style="dim"))
+                console.print(f"[dim]Why:[/dim] {example.explanation}")
+            
+            if rewrite_result.errors:
+                console.print("\n[yellow]Rewrite warnings:[/yellow]")
+                for err in rewrite_result.errors:
+                    console.print(f"  [dim]• {err}[/dim]")
 
 
 def _print_text_report(analysis, result, recommendations, target_schema) -> None:
