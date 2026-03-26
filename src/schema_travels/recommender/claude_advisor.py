@@ -24,6 +24,8 @@ class ClaudeAdvisor:
 
     Provides intelligent analysis and recommendations for NoSQL schema design
     based on access patterns and schema structure.
+    
+    v2.0.0: Added DynamoDB support with single-table design decisions.
     """
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
@@ -78,7 +80,7 @@ class ClaudeAdvisor:
                 model=self.model,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
-                system=self._get_system_prompt(),
+                system=self._get_system_prompt(target),
             )
 
             # Parse response
@@ -121,7 +123,7 @@ class ClaudeAdvisor:
                 model=self.model,
                 max_tokens=2048,
                 messages=[{"role": "user", "content": prompt}],
-                system=self._get_system_prompt(),
+                system=self._get_system_prompt(target),
             )
 
             content = response.content[0].text
@@ -151,9 +153,272 @@ class ClaudeAdvisor:
                 warnings=["Manual review required"],
             )
 
-    def _get_system_prompt(self) -> str:
-        """Get system prompt for Claude."""
-        return """You are an expert database architect specializing in SQL to NoSQL migrations.
+    # =========================================================================
+    # v2.0.0: DynamoDB Gray-Zone Decisions
+    # =========================================================================
+
+    def get_dynamodb_design_decision(
+        self,
+        clusters: list[dict],
+        join_patterns: list[dict],
+        mutation_patterns: list[dict],
+        table_stats: list[dict],
+    ) -> dict[str, Any]:
+        """
+        Get AI decision for DynamoDB design gray zones.
+        
+        Called when deterministic heuristics are inconclusive:
+        - High co-access + write-heavy child tables
+        - Exactly 2-3 table pairs at threshold boundary
+        - Mixed signals between single/multi-table indicators
+        
+        Args:
+            clusters: Access cluster data from DynamoDBDesigner
+            join_patterns: Hot join patterns
+            mutation_patterns: Table write ratios
+            table_stats: Per-table access statistics
+            
+        Returns:
+            Decision dict with 'mode', 'confidence', 'rationale', 'warnings'
+        """
+        prompt = self._build_dynamodb_decision_prompt(
+            clusters, join_patterns, mutation_patterns, table_stats
+        )
+        
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+                system=self._get_dynamodb_decision_system_prompt(),
+            )
+            
+            content = response.content[0].text
+            return self._parse_dynamodb_decision(content)
+            
+        except Exception as e:
+            logger.error(f"Claude API error in DynamoDB decision: {e}")
+            # Fallback to multi-table (safer default)
+            return {
+                "mode": "multi_table",
+                "confidence": 0.5,
+                "rationale": f"AI decision failed ({e}), defaulting to multi-table for safety",
+                "warnings": ["Manual review recommended"],
+            }
+
+    def get_gsi_recommendation(
+        self,
+        table: str,
+        filtered_columns: dict[str, int],
+        selected_columns: dict[str, int],
+        access_patterns: list[str],
+    ) -> list[dict]:
+        """
+        Get AI recommendation for GSI design.
+        
+        Args:
+            table: Table name
+            filtered_columns: {column: frequency} from WHERE clauses
+            selected_columns: {column: frequency} from SELECT clauses
+            access_patterns: Descriptions of access patterns
+            
+        Returns:
+            List of GSI recommendations
+        """
+        prompt = f"""Analyze these access patterns for DynamoDB table '{table}' and recommend GSIs.
+
+## Filtered Columns (WHERE clauses)
+{json.dumps(filtered_columns, indent=2)}
+
+## Selected Columns (SELECT clauses)
+{json.dumps(selected_columns, indent=2)}
+
+## Access Patterns
+{chr(10).join(f'- {p}' for p in access_patterns)}
+
+Recommend GSIs that would optimize these patterns. Consider:
+1. Which columns are queried together
+2. Projection type (KEYS_ONLY, INCLUDE, ALL) based on selected columns
+3. Cost vs performance tradeoff
+
+Respond with JSON:
+```json
+{{
+  "gsis": [
+    {{
+      "name": "GSI name",
+      "pk_attribute": "column for partition key",
+      "sk_attribute": "column for sort key (optional)",
+      "projection_type": "KEYS_ONLY|INCLUDE|ALL",
+      "projected_attributes": ["col1", "col2"],
+      "rationale": "Why this GSI helps"
+    }}
+  ],
+  "warnings": ["Any concerns"]
+}}
+```"""
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+                system=self._get_dynamodb_decision_system_prompt(),
+            )
+            
+            content = response.content[0].text
+            return self._parse_gsi_recommendations(content)
+            
+        except Exception as e:
+            logger.error(f"Claude API error in GSI recommendation: {e}")
+            return []
+
+    def _build_dynamodb_decision_prompt(
+        self,
+        clusters: list[dict],
+        join_patterns: list[dict],
+        mutation_patterns: list[dict],
+        table_stats: list[dict],
+    ) -> str:
+        """Build prompt for DynamoDB design decision."""
+        return f"""Analyze these SQL access patterns and decide on DynamoDB design mode.
+
+## Access Clusters
+{json.dumps(clusters, indent=2)}
+
+## Hot Join Patterns
+{json.dumps(join_patterns, indent=2)}
+
+## Mutation Patterns (Write Ratios)
+{json.dumps(mutation_patterns, indent=2)}
+
+## Table Statistics
+{json.dumps(table_stats, indent=2)}
+
+## Decision Required
+Based on this data, should we use SINGLE_TABLE or MULTI_TABLE design?
+
+Use the Decision Matrix:
+| Signal | Single-Table | Multi-Table |
+|--------|--------------|-------------|
+| Co-access ratio | >70% | <50% |
+| Hot join pairs | ≥3 | <2 |
+| Write-heavy children | Few | Many |
+| Independent queries | Rare | Common |
+
+Respond with JSON:
+```json
+{{
+  "mode": "single_table" or "multi_table",
+  "confidence": 0.0-1.0,
+  "rationale": "Detailed explanation",
+  "key_factors": ["factor1", "factor2"],
+  "warnings": ["potential issues"],
+  "entity_groupings": [
+    {{
+      "pk_table": "main entity",
+      "sk_tables": ["child entities to embed"]
+    }}
+  ]
+}}
+```"""
+
+    def _get_dynamodb_decision_system_prompt(self) -> str:
+        """System prompt for DynamoDB design decisions."""
+        return """You are an expert DynamoDB schema architect specializing in single-table design patterns.
+
+## Decision Matrix for Single-Table vs Multi-Table
+
+FAVOR SINGLE-TABLE when:
+- Tables have >70% co-access ratio (queried together)
+- ≥3 hot join patterns between tables
+- Clear parent-child hierarchy
+- Read-heavy workload
+- Need transactional consistency across entities
+
+FAVOR MULTI-TABLE when:
+- Tables accessed independently >50% of time
+- Child tables are write-heavy (>50% writes)
+- No clear entity hierarchy
+- Different scaling requirements per entity
+- Teams own different tables independently
+
+GRAY ZONES (require careful analysis):
+- 2-3 table pairs at 60-70% co-access threshold
+- High co-access but write-heavy children
+- Mixed read/write patterns
+- Partial independence (some queries solo, some joined)
+
+## Key DynamoDB Constraints
+- Item size limit: 400KB
+- Partition throughput: 3000 RCU / 1000 WCU per partition
+- GSI limit: 20 per table (but 5 is practical)
+- Hot partitions cause throttling
+
+## Response Format
+Always respond with valid JSON. Be specific about which tables should be PK entities vs SK entities in single-table design."""
+
+    def _parse_dynamodb_decision(self, content: str) -> dict[str, Any]:
+        """Parse DynamoDB decision response."""
+        try:
+            json_start = content.find("{")
+            json_end = content.rfind("}") + 1
+            
+            if json_start == -1 or json_end == 0:
+                logger.warning("No JSON found in DynamoDB decision response")
+                return {
+                    "mode": "multi_table",
+                    "confidence": 0.5,
+                    "rationale": "Failed to parse AI response",
+                    "warnings": ["Manual review required"],
+                }
+            
+            json_str = content[json_start:json_end]
+            data = json.loads(json_str)
+            
+            return {
+                "mode": data.get("mode", "multi_table"),
+                "confidence": float(data.get("confidence", 0.5)),
+                "rationale": data.get("rationale", ""),
+                "key_factors": data.get("key_factors", []),
+                "warnings": data.get("warnings", []),
+                "entity_groupings": data.get("entity_groupings", []),
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse DynamoDB decision JSON: {e}")
+            return {
+                "mode": "multi_table",
+                "confidence": 0.5,
+                "rationale": f"JSON parse error: {e}",
+                "warnings": ["Manual review required"],
+            }
+
+    def _parse_gsi_recommendations(self, content: str) -> list[dict]:
+        """Parse GSI recommendations response."""
+        try:
+            json_start = content.find("{")
+            json_end = content.rfind("}") + 1
+            
+            if json_start == -1 or json_end == 0:
+                return []
+            
+            json_str = content[json_start:json_end]
+            data = json.loads(json_str)
+            
+            return data.get("gsis", [])
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse GSI recommendations: {e}")
+            return []
+
+    # =========================================================================
+    # System Prompts
+    # =========================================================================
+
+    def _get_system_prompt(self, target: TargetDatabase = TargetDatabase.MONGODB) -> str:
+        """Get system prompt for Claude based on target database."""
+        base_prompt = """You are an expert database architect specializing in SQL to NoSQL migrations.
 Your role is to analyze access patterns and recommend optimal document/key-value schema designs.
 
 Key principles you follow:
@@ -161,7 +426,16 @@ Key principles you follow:
 2. Reference data that is accessed independently or updated frequently
 3. Consider cardinality - avoid embedding unbounded arrays
 4. Balance read optimization against write complexity
-5. Consider the document size limits (16MB for MongoDB)
+5. Consider the document size limits"""
+
+        if target == TargetDatabase.MONGODB:
+            return base_prompt + """
+
+MongoDB-specific considerations:
+- Document size limit: 16MB
+- Use $lookup sparingly (it's expensive)
+- Embed for read-heavy, reference for write-heavy
+- Consider bucket pattern for time-series
 
 When making recommendations, you:
 - Provide clear reasoning based on the access patterns
@@ -170,6 +444,34 @@ When making recommendations, you:
 - Consider both current patterns and likely future needs
 
 Always respond with valid JSON in the specified format."""
+
+        elif target == TargetDatabase.DYNAMODB:
+            return base_prompt + """
+
+DynamoDB-specific considerations:
+- Item size limit: 400KB
+- Single-table design for related entities accessed together
+- Use PK/SK patterns: USER#<id> / ORDER#<order_id>
+- GSIs for alternative access patterns (max 20, but 5 is practical)
+- Projection types affect cost: KEYS_ONLY < INCLUDE < ALL
+- Hot partitions cause throttling - distribute writes evenly
+- Consider write sharding for high-volume tables
+
+Single-Table Design Patterns:
+- Parent entity: PK = ENTITY#<id>, SK = ENTITY
+- Child entity: PK = PARENT#<parent_id>, SK = CHILD#<id>
+- Use GSI for inverted lookups (child → parent)
+
+When making recommendations, you:
+- Recommend EMBED for high co-access (>70%)
+- Recommend REFERENCE (separate items, same table) for moderate co-access
+- Recommend SEPARATE (different tables) for independent access patterns
+- Consider write amplification in single-table design
+- Warn about hot partition risks
+
+Always respond with valid JSON in the specified format."""
+
+        return base_prompt + "\n\nAlways respond with valid JSON in the specified format."
 
     def _build_prompt(
         self,
@@ -185,6 +487,12 @@ Always respond with valid JSON in the specified format."""
         # Prepare analysis summary
         analysis_summary = self._summarize_analysis(analysis)
 
+        if target == TargetDatabase.DYNAMODB:
+            return self._build_dynamodb_prompt(
+                schema_summary, analysis_summary, additional_context
+            )
+
+        # MongoDB prompt (default)
         prompt = f"""Analyze this SQL database and recommend an optimal {target.value} schema design.
 
 ## Source Schema
@@ -230,6 +538,65 @@ Respond with JSON in this exact format:
 ```"""
 
         return prompt
+
+    def _build_dynamodb_prompt(
+        self,
+        schema_summary: str,
+        analysis_summary: str,
+        additional_context: str | None,
+    ) -> str:
+        """Build DynamoDB-specific analysis prompt."""
+        return f"""Analyze this SQL database and recommend an optimal DynamoDB schema design.
+
+## Source Schema
+{schema_summary}
+
+## Access Pattern Analysis
+{analysis_summary}
+
+## Additional Context
+{additional_context or "No additional context provided."}
+
+## Task
+Based on the access patterns, recommend how to structure the data in DynamoDB.
+Consider single-table design vs multi-table based on:
+- Co-access patterns (>70% = single table candidate)
+- Write patterns (write-heavy children may need separation)
+- Query independence (tables queried alone vs together)
+
+For each relationship, decide whether to:
+- EMBED: Same item (use composite SK)
+- REFERENCE: Separate items in same table (PK/SK pattern)
+- SEPARATE: Different DynamoDB tables
+- BUCKET: Time-series bucketing pattern
+
+Respond with JSON in this exact format:
+```json
+{{
+  "design_mode": "single_table" or "multi_table",
+  "recommendations": [
+    {{
+      "parent_table": "table_name",
+      "child_table": "related_table_name",
+      "decision": "EMBED|REFERENCE|SEPARATE|BUCKET",
+      "confidence": 0.0-1.0,
+      "reasoning": ["reason 1", "reason 2"],
+      "warnings": ["warning 1"],
+      "pk_pattern": "PARENT#<id>",
+      "sk_pattern": "CHILD#<id>"
+    }}
+  ],
+  "general_advice": "Overall migration advice",
+  "suggested_gsis": [
+    {{
+      "name": "GSI1",
+      "pk_attribute": "GSI1PK",
+      "sk_attribute": "GSI1SK",
+      "purpose": "Enable lookup by X"
+    }}
+  ]
+}}
+```"""
 
     def _build_specific_prompt(
         self,

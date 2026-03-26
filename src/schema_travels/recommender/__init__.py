@@ -21,8 +21,21 @@ from schema_travels.recommender.query_rewriter import (
     QueryRewriteExample,
     RewriteResult,
 )
+# v2.0.0: DynamoDB support
+from schema_travels.recommender.dynamodb_models import (
+    DesignMode,
+    ProjectionType,
+    AccessCluster,
+    EntityDefinition,
+    GSIDefinition,
+    DynamoDBDesign,
+    TableDesign,
+)
+from schema_travels.recommender.dynamodb_designer import DynamoDBDesigner
+from schema_travels.recommender.dynamodb_output import DynamoDBOutputFormatter
 
 __all__ = [
+    # Core
     "ClaudeAdvisor",
     "SchemaGenerator",
     "TargetDatabase",
@@ -30,12 +43,24 @@ __all__ = [
     "SchemaRecommendation",
     "TargetSchema",
     "CollectionDefinition",
+    # Cache
     "get_cache",
     "compute_input_hash",
     "RecommendationCache",
     "CacheMode",
     "RECOMMENDATION_VERSION",
+    # Query rewriter
     "generate_rewrites",
     "QueryRewriteExample",
     "RewriteResult",
+    # v2.0.0: DynamoDB
+    "DesignMode",
+    "ProjectionType",
+    "AccessCluster",
+    "EntityDefinition",
+    "GSIDefinition",
+    "DynamoDBDesign",
+    "TableDesign",
+    "DynamoDBDesigner",
+    "DynamoDBOutputFormatter",
 ]
