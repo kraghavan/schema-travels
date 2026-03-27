@@ -22,6 +22,22 @@
 pip install schema-travels
 ```
 
+### 🔑 Review of Schema by AI
+
+So Please remember that Frontier Model Claude and its API key is required to use this tool. 
+```
+╭─────────────────────────────────────────────────────────────────────╮
+│                    ⚠️  API KEY NOT CONFIGURED                       │
+├─────────────────────────────────────────────────────────────────────┤
+│  Schema Travels requires an Anthropic API key for AI-powered        │
+│  schema recommendations.                                            │
+│                                                                     │
+│  Option 1: export ANTHROPIC_API_KEY=sk-ant-xxxxx                    │
+│  Option 2: echo "ANTHROPIC_API_KEY=sk-ant-xxxxx" > .env             │
+│                                                                     │
+│  Get your API key at: https://console.anthropic.com/settings/keys   │
+╰─────────────────────────────────────────────────────────────────────╯
+
 ## Quick Start
 
 ### MongoDB Migration
