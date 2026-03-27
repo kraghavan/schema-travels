@@ -1,10 +1,14 @@
-"""Schema generator module for creating target schema definitions."""
+"""Schema generator module for creating target schema definitions.
+
+v2.0.0: Added DynamoDB single-table design support.
+v2.0.1: Added AI review workflow for DynamoDB designs.
+"""
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from schema_travels.collector.models import SchemaDefinition, TableDefinition
-from schema_travels.analyzer.models import AnalysisResult
+from schema_travels.analyzer.models import AnalysisResult, TableStatistics
 from schema_travels.recommender.models import (
     CollectionDefinition,
     EmbeddedDocument,
@@ -14,6 +18,14 @@ from schema_travels.recommender.models import (
     TargetDatabase,
     TargetSchema,
 )
+# v2.0.0: DynamoDB imports
+from schema_travels.recommender.dynamodb_models import (
+    DesignMode,
+    DynamoDBDesign,
+    DynamoDBReview,
+)
+from schema_travels.recommender.dynamodb_designer import DynamoDBDesigner
+from schema_travels.recommender.dynamodb_output import DynamoDBOutputFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +68,9 @@ class SchemaGenerator:
 
     Combines rule-based analysis with AI recommendations to produce
     optimal target schema definitions.
+    
+    v2.0.0: Added DynamoDB single-table design support via DynamoDBDesigner.
+    v2.0.1: Added AI review workflow for DynamoDB designs.
     """
 
     def __init__(
@@ -63,6 +78,13 @@ class SchemaGenerator:
         source_schema: SchemaDefinition,
         analysis: AnalysisResult,
         recommendations: list[SchemaRecommendation] | None = None,
+        # v2.0.0: DynamoDB options
+        dynamodb_mode: DesignMode = DesignMode.AUTO,
+        filtered_columns: dict[str, dict[str, int]] | None = None,
+        selected_columns: dict[str, dict[str, int]] | None = None,
+        select_star_tables: set[str] | None = None,
+        # v2.0.1: AI review for DynamoDB
+        dynamodb_review: Optional[DynamoDBReview] = None,
     ):
         """
         Initialize schema generator.
@@ -70,11 +92,25 @@ class SchemaGenerator:
         Args:
             source_schema: Source database schema
             analysis: Analysis result from pattern analyzer
-            recommendations: Optional pre-computed recommendations
+            recommendations: Optional pre-computed recommendations (used for MongoDB only)
+            dynamodb_mode: DynamoDB design mode (AUTO, SINGLE_TABLE, MULTI_TABLE)
+            filtered_columns: Column filter frequencies from MutationAnalyzer
+            selected_columns: Column select frequencies from MutationAnalyzer
+            select_star_tables: Tables with SELECT * usage
+            dynamodb_review: Optional AI review of DynamoDB design (v2.0.1)
         """
         self.source_schema = source_schema
         self.analysis = analysis
         self.recommendations = recommendations or []
+        
+        # v2.0.0: DynamoDB options
+        self.dynamodb_mode = dynamodb_mode
+        self.filtered_columns = filtered_columns or {}
+        self.selected_columns = selected_columns or {}
+        self.select_star_tables = select_star_tables or set()
+        
+        # v2.0.1: AI review
+        self.dynamodb_review = dynamodb_review
 
         # Build lookup maps
         self._table_lookup = {t.name.lower(): t for t in source_schema.tables}
@@ -210,8 +246,9 @@ class SchemaGenerator:
 
     def _convert_column(self, col) -> FieldDefinition:
         """Convert SQL column to field definition."""
-        sql_type = col.data_type.lower().split("(")[0].strip()
-        mongo_type = SQL_TO_MONGO_TYPES.get(sql_type, "string")
+        mongo_type = SQL_TO_MONGO_TYPES.get(
+            col.data_type.lower(), "string"
+        )
 
         return FieldDefinition(
             name=col.name,
@@ -222,47 +259,286 @@ class SchemaGenerator:
         )
 
     def _is_fk_column(self, table_name: str, column_name: str) -> bool:
-        """Check if a column is a foreign key column."""
+        """Check if a column is a foreign key."""
         for fk in self.source_schema.foreign_keys:
-            if fk.from_table.lower() == table_name.lower():
-                if column_name.lower() in [c.lower() for c in fk.from_columns]:
-                    return True
+            if (
+                fk.from_table.lower() == table_name.lower()
+                and column_name in fk.from_columns
+            ):
+                return True
         return False
 
+    # =========================================================================
+    # v2.0.0: DynamoDB Schema Generation
+    # =========================================================================
+
     def _generate_dynamodb_schema(self) -> TargetSchema:
-        """Generate DynamoDB schema."""
-        collections: list[CollectionDefinition] = []
-        warnings: list[str] = []
+        """
+        Generate DynamoDB schema using DynamoDBDesigner.
+        
+        v2.0.0: Uses access cluster analysis for single-table design.
+        v2.0.1: Applies AI review if provided. Does NOT include MongoDB-style
+                recommendations - DynamoDB design is in metadata.dynamodb_design.
+        """
+        # Build table statistics if not already in analysis
+        table_stats = self._build_table_stats()
+        
+        # Create designer with specified mode
+        designer = DynamoDBDesigner(
+            mode=self.dynamodb_mode,
+            co_access_threshold=0.70,
+        )
+        
+        # Generate DynamoDB design (algorithmic)
+        design = designer.design(
+            table_stats=table_stats,
+            access_patterns=self.analysis.access_patterns,
+            join_patterns=self.analysis.join_patterns,
+            mutation_patterns=self.analysis.mutation_patterns,
+            filtered_columns=self.filtered_columns,
+            selected_columns=self.selected_columns,
+            select_star_tables=self.select_star_tables,
+        )
+        
+        # v2.0.1: Apply AI review if provided
+        if self.dynamodb_review is not None:
+            from schema_travels.recommender.dynamodb_review import apply_review
+            design = apply_review(design, self.dynamodb_review)
+            logger.info(f"Applied AI review: {self.dynamodb_review.change_count} changes")
+        
+        # Convert DynamoDB design to TargetSchema for compatibility
+        return self._dynamodb_design_to_target_schema(design)
+        
+        # Convert DynamoDB design to TargetSchema for compatibility
+        return self._dynamodb_design_to_target_schema(design)
 
-        # DynamoDB requires different approach - single table design
-        # or multiple tables with GSIs
-
-        # For now, create a table per entity with appropriate keys
+    def _build_table_stats(self) -> list[TableStatistics]:
+        """Build TableStatistics from analysis if not already present."""
+        # Use existing table_statistics from analysis
+        if self.analysis.table_statistics:
+            # Enrich with selected columns if available
+            stats = []
+            for ts in self.analysis.table_statistics:
+                # Add frequently_selected_columns from our data
+                table_selected = self.selected_columns.get(ts.table, {})
+                sorted_selected = sorted(
+                    table_selected.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                
+                # Create new TableStatistics with selected columns
+                stats.append(TableStatistics(
+                    table=ts.table,
+                    total_accesses=ts.total_accesses,
+                    solo_accesses=ts.solo_accesses,
+                    joined_accesses=ts.joined_accesses,
+                    total_time_ms=ts.total_time_ms,
+                    frequently_filtered_columns=ts.frequently_filtered_columns,
+                    frequently_updated_columns=ts.frequently_updated_columns,
+                    frequently_selected_columns=[col for col, _ in sorted_selected[:10]],
+                    has_select_star=ts.table in self.select_star_tables,
+                ))
+            return stats
+        
+        # Build from source schema if no analysis stats
+        stats = []
         for table in self.source_schema.tables:
-            collection = self._create_dynamodb_table(table)
+            table_name = table.name.lower()
+            
+            # Get filtered columns
+            table_filtered = self.filtered_columns.get(table_name, {})
+            sorted_filtered = sorted(
+                table_filtered.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            
+            # Get selected columns
+            table_selected = self.selected_columns.get(table_name, {})
+            sorted_selected = sorted(
+                table_selected.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            
+            stats.append(TableStatistics(
+                table=table_name,
+                total_accesses=0,
+                solo_accesses=0,
+                joined_accesses=0,
+                frequently_filtered_columns=[col for col, _ in sorted_filtered[:5]],
+                frequently_selected_columns=[col for col, _ in sorted_selected[:10]],
+                has_select_star=table_name in self.select_star_tables,
+            ))
+        
+        return stats
+
+    def _dynamodb_design_to_target_schema(
+        self,
+        design: DynamoDBDesign,
+    ) -> TargetSchema:
+        """
+        Convert DynamoDBDesign to TargetSchema for API compatibility.
+        
+        v2.0.1 FIX: Does NOT include MongoDB-style recommendations.
+        For DynamoDB, the design is fully contained in metadata.dynamodb_design.
+        The 'recommendations' field is empty for DynamoDB targets.
+        """
+        collections: list[CollectionDefinition] = []
+        warnings: list[str] = list(design.warnings)
+        
+        if design.design_mode == DesignMode.SINGLE_TABLE:
+            # Single table with entities
+            collection = self._create_dynamodb_single_table_collection(design)
             collections.append(collection)
             
-        warnings.append(
-            "DynamoDB schema generation is basic. "
-            "Consider single-table design for complex access patterns."
-        )
-
+            # Add orphan tables as separate collections
+            for orphan_table in design.orphan_tables:
+                table_def = self._table_lookup.get(orphan_table)
+                if table_def:
+                    collections.append(self._create_dynamodb_table(table_def))
+                    warnings.append(
+                        f"Table '{orphan_table}' not included in single-table design - "
+                        f"created as separate table"
+                    )
+        else:
+            # Multi-table design
+            for table_design in design.tables:
+                collections.append(
+                    self._table_design_to_collection(table_design)
+                )
+        
+        # v2.0.1 FIX: Empty recommendations for DynamoDB!
+        # MongoDB concepts like EMBED/REFERENCE don't apply to DynamoDB.
+        # The full design is in metadata.dynamodb_design.
         return TargetSchema(
             target_type=TargetDatabase.DYNAMODB,
             collections=collections,
-            recommendations=self.recommendations,
+            recommendations=[],  # v2.0.1: Empty! DynamoDB design is in metadata.
             warnings=warnings,
             metadata={
                 "source_tables": len(self.source_schema.tables),
                 "target_tables": len(collections),
+                "design_mode": design.design_mode.value,
+                "confidence": design.confidence,
+                "rationale": design.rationale,
+                # v2.0.0: Include full design for downstream tools
+                "dynamodb_design": design.to_dict(),
             },
+        )
+
+    def _create_dynamodb_single_table_collection(
+        self,
+        design: DynamoDBDesign,
+    ) -> CollectionDefinition:
+        """Create collection definition for single-table DynamoDB design."""
+        # Collect all source tables from entities
+        source_tables = [e.source_table for e in design.entities]
+        
+        # Build fields from PK/SK
+        fields = [
+            FieldDefinition(
+                name=design.partition_key,
+                type="string",
+                nullable=False,
+                is_key=True,
+            ),
+        ]
+        
+        if design.sort_key:
+            fields.append(FieldDefinition(
+                name=design.sort_key,
+                type="string",
+                nullable=False,
+                is_key=True,
+            ))
+        
+        # Add entity type field
+        fields.append(FieldDefinition(
+            name="_entity_type",
+            type="string",
+            nullable=False,
+        ))
+        
+        # Build GSI definitions
+        gsis = []
+        for gsi in design.gsis:
+            gsis.append({
+                "IndexName": gsi.name,
+                "KeySchema": [
+                    {"AttributeName": gsi.pk_attribute, "KeyType": "HASH"},
+                ] + ([{"AttributeName": gsi.sk_attribute, "KeyType": "RANGE"}] if gsi.sk_attribute else []),
+                "Projection": {
+                    "ProjectionType": gsi.projection_type.value,
+                    **({"NonKeyAttributes": gsi.projected_attributes} if gsi.projected_attributes else {}),
+                },
+            })
+        
+        return CollectionDefinition(
+            name=design.table_name or "main_table",
+            source_tables=source_tables,
+            fields=fields,
+            partition_key=design.partition_key,
+            sort_key=design.sort_key,
+            gsi=gsis,
+        )
+
+    def _table_design_to_collection(
+        self,
+        table_design,
+    ) -> CollectionDefinition:
+        """Convert TableDesign to CollectionDefinition."""
+        # Get source table definition
+        source_table = self._table_lookup.get(table_design.source_table.lower())
+        
+        fields = []
+        if source_table:
+            fields = [self._convert_column(col) for col in source_table.columns]
+        else:
+            fields = [
+                FieldDefinition(
+                    name=table_design.partition_key,
+                    type="string",
+                    nullable=False,
+                    is_key=True,
+                ),
+            ]
+            if table_design.sort_key:
+                fields.append(FieldDefinition(
+                    name=table_design.sort_key,
+                    type="string",
+                    nullable=False,
+                    is_key=True,
+                ))
+        
+        # Build GSI definitions
+        gsis = []
+        for gsi in table_design.gsis:
+            gsis.append({
+                "IndexName": gsi.name,
+                "KeySchema": [
+                    {"AttributeName": gsi.pk_attribute, "KeyType": "HASH"},
+                ] + ([{"AttributeName": gsi.sk_attribute, "KeyType": "RANGE"}] if gsi.sk_attribute else []),
+                "Projection": {
+                    "ProjectionType": gsi.projection_type.value,
+                },
+            })
+        
+        return CollectionDefinition(
+            name=table_design.table_name,
+            source_tables=[table_design.source_table],
+            fields=fields,
+            partition_key=table_design.partition_key,
+            sort_key=table_design.sort_key,
+            gsi=gsis,
         )
 
     def _create_dynamodb_table(
         self,
         table: TableDefinition,
     ) -> CollectionDefinition:
-        """Create a DynamoDB table definition."""
+        """Create a DynamoDB table definition (legacy method, still used for orphan tables)."""
         fields = [self._convert_column(col) for col in table.columns]
 
         # Determine partition and sort keys
@@ -295,12 +571,30 @@ class SchemaGenerator:
         gsis = []
         table_name = table.name.lower()
 
-        # Find frequently filtered columns from analysis
+        # First check filtered_columns from MutationAnalyzer (v2.0.0)
+        if table_name in self.filtered_columns:
+            filtered = self.filtered_columns[table_name]
+            sorted_cols = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
+            
+            for col, freq in sorted_cols[:3]:
+                if col not in (table.primary_key or []) and freq >= 5:
+                    gsis.append({
+                        "IndexName": f"{table_name}-{col}-index",
+                        "KeySchema": [
+                            {"AttributeName": col, "KeyType": "HASH"},
+                        ],
+                        "Projection": {"ProjectionType": "ALL"},
+                    })
+            
+            if gsis:
+                return gsis
+
+        # Fallback: Find frequently filtered columns from analysis
         for ts in self.analysis.table_statistics:
             if ts.table.lower() == table_name:
                 for col in ts.frequently_filtered_columns[:3]:
                     # Don't create GSI for primary key
-                    if col not in table.primary_key:
+                    if col not in (table.primary_key or []):
                         gsis.append({
                             "IndexName": f"{table_name}-{col}-index",
                             "KeySchema": [
@@ -311,6 +605,46 @@ class SchemaGenerator:
                 break
 
         return gsis
+
+    # =========================================================================
+    # v2.0.0: DynamoDB Output Helpers
+    # =========================================================================
+
+    def generate_dynamodb_output(
+        self,
+        output_format: str = "json",
+        **kwargs,
+    ) -> str:
+        """
+        Generate DynamoDB schema in specified format.
+        
+        Args:
+            output_format: One of "json", "terraform", "nosql_workbench"
+            **kwargs: Format-specific options
+            
+        Returns:
+            Formatted schema string
+        """
+        # Generate design
+        table_stats = self._build_table_stats()
+        
+        designer = DynamoDBDesigner(
+            mode=self.dynamodb_mode,
+            co_access_threshold=0.70,
+        )
+        
+        design = designer.design(
+            table_stats=table_stats,
+            access_patterns=self.analysis.access_patterns,
+            join_patterns=self.analysis.join_patterns,
+            mutation_patterns=self.analysis.mutation_patterns,
+            filtered_columns=self.filtered_columns,
+            selected_columns=self.selected_columns,
+            select_star_tables=self.select_star_tables,
+        )
+        
+        # Format output
+        return DynamoDBOutputFormatter.format(design, output_format, **kwargs)
 
     def generate_sample_documents(
         self,

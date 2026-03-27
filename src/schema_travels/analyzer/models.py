@@ -164,6 +164,10 @@ class TableStatistics:
     total_time_ms: float = 0.0
     frequently_filtered_columns: list[str] = field(default_factory=list)
     frequently_updated_columns: list[str] = field(default_factory=list)
+    # v2.0.0: Track columns in SELECT clauses for GSI projection optimization
+    frequently_selected_columns: list[str] = field(default_factory=list)
+    # v2.0.0: Track if SELECT * is used (indicates full projection needed)
+    has_select_star: bool = False
 
     @property
     def solo_ratio(self) -> float:
@@ -181,6 +185,8 @@ class TableStatistics:
             "total_time_ms": self.total_time_ms,
             "frequently_filtered_columns": self.frequently_filtered_columns,
             "frequently_updated_columns": self.frequently_updated_columns,
+            "frequently_selected_columns": self.frequently_selected_columns,
+            "has_select_star": self.has_select_star,
         }
 
 
