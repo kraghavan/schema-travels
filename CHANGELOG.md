@@ -8,9 +8,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
-- DynamoDB single-table design support
 - Web UI dashboard
 - Real-time log streaming
+- GraphRAG-based semantic schema migration reasoning (v3.0.0)
+
+---
+
+## [2.0.1] - 2025-03-27
+
+### Added
+- **DynamoDB AI Review Workflow**
+  - `ClaudeAdvisor.review_dynamodb_design()` — AI reviews local design
+  - `DynamoDBReview` model — structured review with entity/GSI changes
+  - `apply_review()` helper — merges AI suggestions into design
+  - `summarize_review_changes()` — human-readable review summary
+
+- **Consistent AI Flow**
+  - MongoDB: Claude as architect (designs schema)
+  - DynamoDB: Claude as reviewer (validates local design)
+  - Both targets now use AI when `--use-ai` (default)
+
+### Fixed
+- **Table Alias Resolution** (`mutations.py`)
+  - `SELECT u.* FROM users u` now correctly tracks `users` table
+  - New `_extract_tables_with_aliases()` method
+  - Alias mapping passed to column extraction methods
+
+- **DynamoDB Output Cleanup**
+  - No MongoDB-style EMBED/REFERENCE in DynamoDB output
+  - `recommendations=[]` for DynamoDB (design in metadata)
+  - Console skips recommendations table for DynamoDB
+
+### Technical
+- New module: `recommender/dynamodb_review.py`
+- New models: `DynamoDBReview`, `EntityChange`, `GSIChange`, `GSIChangeAction`, `ReviewChangeType`
+- Updated: `claude_advisor.py`, `schema_generator.py`, `mutations.py`, `cli/main.py`
+- AI reviews cached separately with `_review` suffix
+
+---
+
+## [2.0.0] - 2025-03-26
+
+### Added
+- **DynamoDB Single-Table Design Support**
+  - `--target dynamodb` option for DynamoDB schema generation
+  - `--dynamodb-mode [auto|single|multi]` for design mode control
+  - `--dynamodb-output [json|terraform|nosql_workbench]` for output formats
+
+- **Access Cluster Analysis**
+  - Union-Find algorithm groups co-accessed tables
+  - `CO_ACCESS_THRESHOLD = 0.70` for single-table candidates
+  - Automatic PK/SK pattern generation per entity
+
+- **GSI Optimization**
+  - SELECT clause extraction for projection type decisions
+  - `KEYS_ONLY` / `INCLUDE` / `ALL` based on actual column usage
+  - Frequently filtered columns → GSI candidates
+  - Max 5 GSIs per table (DynamoDB limit)
+
+- **Output Formats**
+  - JSON: Full design with entities, GSIs, access patterns
+  - Terraform HCL: Ready-to-deploy infrastructure code
+  - NoSQL Workbench: Import-ready JSON format
+
+- **New Modules**
+  - `recommender/dynamodb_models.py` — Pydantic models for DynamoDB
+  - `recommender/dynamodb_designer.py` — Algorithmic design engine
+  - `recommender/dynamodb_output.py` — Output formatters
+
+- **Visualization**
+  - `tools/visualize_schema.py` updated for DynamoDB
+  - Orange/black AWS-themed HTML output
+  - Entity grid with PK/SK patterns
+  - GSI table with projection types
+
+### Changed
+- `MutationAnalyzer` now tracks `selected_columns` and `select_star_tables`
+- `SchemaGenerator` accepts DynamoDB-specific options
+- Cache keys include target database type
+
+### Technical
+- New enum: `DesignMode` (SINGLE_TABLE, MULTI_TABLE, AUTO)
+- New enum: `ProjectionType` (KEYS_ONLY, INCLUDE, ALL)
+- New classes: `DynamoDBDesign`, `EntityDefinition`, `GSIDefinition`, `AccessCluster`
+- `DynamoDBDesigner` with Union-Find clustering
 
 ---
 
@@ -70,11 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--clear-cache` flag to invalidate all cached recommendations
 
 - **Cache Modes** (`--cache-mode`)
-  - `relaxed` (default): Ignores small log changes. Cache invalidates only on 
-    significant pattern changes (new joins, schema changes, tables flipping 
-    from read-heavy to write-heavy)
-  - `strict`: Any change in query counts invalidates cache. Use when you want
-    fresh recommendations for every data change.
+  - `relaxed` (default): Ignores small log changes
+  - `strict`: Any change in query counts invalidates cache
 
 - **Cache Comparison**
   - Compare recommendations between different runs
@@ -108,57 +186,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hot join detection and ranking
   - Co-access pattern analysis
   - Read/write ratio tracking per table
-  - Table statistics collection
 
 - **AI Recommendations**
   - Claude API integration for intelligent recommendations
   - EMBED vs REFERENCE decision making
   - Confidence scoring (0-100%)
   - Detailed reasoning for each decision
-  - Warning detection for edge cases
 
 - **Schema Generation**
   - MongoDB collection schema generation
   - Embedded document definitions
   - Reference relationship mapping
-  - Sample document generation
-  - JSON Schema output format
 
 - **Migration Simulation**
   - Storage impact estimation
   - Query latency projection
   - Cost comparison (source vs target)
-  - Configurable cost models
 
 - **CLI Interface**
   - `analyze` command for full analysis
   - `report` command for viewing results
   - `history` command for listing analyses
-  - `simulate` command for impact estimation
-  - `config` command for checking setup
   - Rich terminal output with tables
 
 - **Persistence**
   - SQLite storage for analysis history
   - Query result caching
-  - Recommendation persistence
 
 - **Visualization**
   - HTML interactive reports
   - Mermaid ER diagram generation
-  - Console tree view
 
 - **Testing Tools**
   - Synthetic workload generator
-  - E-commerce workload patterns
-  - OLTP workload patterns
-  - Analytics workload patterns
-
-### Technical
-- Python 3.10+ support
-- Pydantic for configuration
-- Click for CLI
-- Rich for terminal formatting
+  - E-commerce/OLTP/Analytics patterns
 
 ---
 
@@ -167,10 +228,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial project structure
 - Basic proof of concept
-- Core module organization
 
 ---
 
+[2.0.1]: https://github.com/kraghavan/schema-travels/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/kraghavan/schema-travels/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/kraghavan/schema-travels/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/kraghavan/schema-travels/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/kraghavan/schema-travels/compare/v1.0.0...v1.1.0

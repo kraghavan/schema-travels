@@ -6,7 +6,7 @@
 
 **Schema Travels** is a CLI tool that analyzes SQL database query patterns and recommends optimal NoSQL (MongoDB/DynamoDB) schema designs. It uses Claude AI for intelligent recommendations.
 
-**Current Version:** 1.3.0
+**Current Version:** 2.0.1
 
 ## Architecture
 
@@ -14,18 +14,23 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                         CLI (Click)                             │
 │                     schema-travels analyze                      │
+│                  --target [mongodb|dynamodb]                    │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
         ┌─────────────┼─────────────┐
         ▼             ▼             ▼
-┌───────────┐  ┌───────────┐  ┌───────────┐
-│ Collector │  │ Analyzer  │  │Recommender│
-│           │  │           │  │           │
-│ • Logs    │  │ • HotJoins│  │ • Claude  │
-│ • Schema  │  │ • Mutation│  │ • Cache   │
-└─────┬─────┘  └─────┬─────┘  └─────┬─────┘
-      │              │              │
-      └──────────────┼──────────────┘
+┌───────────┐  ┌───────────┐  ┌─────────────────┐
+│ Collector │  │ Analyzer  │  │   Recommender   │
+│           │  │           │  │                 │
+│ • Logs    │  │ • HotJoins│  │ MongoDB:        │
+│ • Schema  │  │ • Mutation│  │  • Claude recs  │
+│           │  │ • Pattern │  │                 │
+│           │  │           │  │ DynamoDB:       │
+│           │  │           │  │  • Designer     │
+│           │  │           │  │  • Claude review│
+└─────┬─────┘  └─────┬─────┘  └────────┬────────┘
+      │              │                 │
+      └──────────────┼─────────────────┘
                      ▼
               ┌───────────┐     ┌───────────┐
               │ Simulator │────▶│Persistence│
@@ -38,114 +43,194 @@
 | Module | Purpose | Key Files |
 |--------|---------|-----------|
 | `collector/` | Parse DB logs & SQL schemas | `log_parser.py`, `schema_parser.py` |
-| `analyzer/` | Detect patterns (joins, mutations) | `hot_joins.py`, `mutations.py`, `pattern_analyzer.py` |
-| `recommender/` | AI recommendations + schema generation | `claude_advisor.py`, `schema_generator.py`, `cache.py` |
+| `analyzer/` | Detect patterns (joins, mutations, columns) | `hot_joins.py`, `mutations.py`, `pattern_analyzer.py` |
+| `recommender/` | AI recommendations + schema generation | See detailed table below |
 | `simulator/` | Estimate migration impact | `cost_model.py`, `simulator.py` |
 | `persistence/` | SQLite storage | `database.py`, `repository.py` |
 | `cli/` | Command-line interface | `main.py` |
 
-## v1.3.0 Changes
+### Recommender Module (v2.0.1)
 
-### Cache Modes (`--cache-mode`)
+| File | Purpose |
+|------|---------|
+| `claude_advisor.py` | AI: MongoDB recs + DynamoDB review |
+| `schema_generator.py` | Generate target schemas |
+| `cache.py` | Hash-based caching |
+| `query_rewriter.py` | SQL → MongoDB rewrites |
+| `models.py` | Core data models |
+| `dynamodb_models.py` | DynamoDB design models |
+| `dynamodb_designer.py` | Algorithmic DynamoDB design |
+| `dynamodb_output.py` | JSON/Terraform/NoSQL Workbench |
+| `dynamodb_review.py` | Apply AI review to design |
+
+## Target Database Flows
+
+### MongoDB Flow
 
 ```python
-class CacheMode(Enum):
-    RELAXED = "relaxed"  # Ignores small log changes (default)
-    STRICT = "strict"    # Any count change = cache miss
+# Claude acts as ARCHITECT — designs the schema
+advisor = ClaudeAdvisor()
+recommendations = advisor.get_recommendations(schema, analysis, TargetDatabase.MONGODB)
+# Returns: [SchemaRecommendation(decision=EMBED/REFERENCE, ...)]
+
+generator = SchemaGenerator(schema, analysis, recommendations)
+target_schema = generator.generate(TargetDatabase.MONGODB)
 ```
 
-| Mode | Hash Includes | Use When |
-|------|--------------|----------|
-| `relaxed` | Join pairs, table classification (read/write heavy) | Iterating on logs, want stable results |
-| `strict` | Exact frequencies, exact ratios | Need fresh recommendations for any change |
+### DynamoDB Flow (v2.0.0+)
+
+```python
+# 1. Local algorithmic design
+designer = DynamoDBDesigner(mode=DesignMode.AUTO)
+local_design = designer.design(table_stats, access_patterns, ...)
+
+# 2. Claude acts as REVIEWER — validates the design
+advisor = ClaudeAdvisor()
+review = advisor.review_dynamodb_design(local_design, analysis, schema)
+# Returns: DynamoDBReview(approved=True, entity_changes=[], gsi_changes=[], ...)
+
+# 3. Apply review suggestions
+from schema_travels.recommender.dynamodb_review import apply_review
+final_design = apply_review(local_design, review)
+
+# 4. Generate output
+generator = SchemaGenerator(schema, analysis, dynamodb_review=review)
+target_schema = generator.generate(TargetDatabase.DYNAMODB)
+```
+
+## CLI Options
+
+### Basic Usage
 
 ```bash
-# Use strict mode for this run only
-schema-travels analyze --cache-mode strict --logs-dir ./logs --schema-file ./schema.sql
+# MongoDB (default)
+schema-travels analyze \
+    --logs-dir ./logs \
+    --schema-file ./schema.sql \
+    --output results.json
 
-# Different modes = different cache keys (won't share cache)
+# DynamoDB
+schema-travels analyze \
+    --logs-dir ./logs \
+    --schema-file ./schema.sql \
+    --target dynamodb \
+    --output results.json
 ```
 
----
-
-## v1.1.0 Changes
-
-### Recommendation Caching (`recommender/cache.py`)
-
-Ensures reproducible results by caching AI recommendations:
-
-```python
-from schema_travels.recommender.cache import compute_input_hash, get_cache, CacheMode
-
-# Compute deterministic hash of inputs
-input_hash = compute_input_hash(schema, analysis, target, CacheMode.RELAXED)
-
-# Check cache before calling Claude
-cache = get_cache()
-cached = cache.get(input_hash)
-
-if cached:
-    recommendations = cached  # Use cached (consistent)
-else:
-    recommendations = claude_advisor.get_recommendations(...)
-    cache.put(input_hash, recommendations)  # Cache for next time
-```
-
-Key constants:
-- `RECOMMENDATION_VERSION = "1.3.0"` — Bump to invalidate all caches
-
-### API Key Validation (`config.py`)
-
-```python
-from schema_travels.config import APIKeyNotConfiguredError
-
-# Raises clear error if API key missing
-settings.require_api_key()
-```
-
-## Development Commands
+### DynamoDB-Specific Options
 
 ```bash
-# Install in dev mode
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run specific test
-pytest tests/test_analyzer.py -v
-
-# Lint
-ruff check src/
-
-# Format
-ruff format src/
-
-# Type check
-mypy src/
+schema-travels analyze \
+    --target dynamodb \
+    --dynamodb-mode auto \           # auto | single | multi
+    --dynamodb-output terraform \    # json | terraform | nosql_workbench
+    --logs-dir ./logs \
+    --schema-file ./schema.sql
 ```
 
-## Code Conventions
+### AI Control
 
-1. **Type hints**: All functions should have type annotations
-2. **Docstrings**: Google-style docstrings for public methods
-3. **Models**: Use `dataclasses` for data structures, `pydantic` for config
-4. **SQL Parsing**: Use `sqlglot` library (supports multiple dialects)
-5. **CLI**: Use `click` for commands, `rich` for output formatting
+```bash
+# Skip AI (use local algorithmic design only for DynamoDB)
+schema-travels analyze --target dynamodb --no-ai ...
 
-## Data Flow
+# Force fresh AI analysis (bypass cache)
+schema-travels analyze --no-cache ...
 
-1. **Input**: User provides `--logs-dir` and `--schema-file`
-2. **Collect**: Parse logs → `QueryLog` objects; Parse schema → `SchemaDefinition`
-3. **Analyze**: Process queries → `JoinPattern`, `MutationPattern`, `AccessPattern`
-4. **Cache Check**: Compute input hash → Check cache for existing recommendations
-5. **Recommend**: If not cached, send to Claude API → `SchemaRecommendation` (EMBED/REFERENCE)
-6. **Cache Store**: Save recommendations to cache for future runs
-7. **Generate**: Build target schema → `TargetSchema` (MongoDB/DynamoDB format)
-8. **Simulate**: Estimate impact → `SimulationResult` (storage/latency/cost)
-9. **Persist**: Store in SQLite for history/reporting
+# Clear all cached results
+schema-travels analyze --clear-cache ...
+```
 
-## Key Decision Rules (Embed vs Reference)
+### Cache Modes
+
+```bash
+# Relaxed (default): Ignores small log changes
+schema-travels analyze --cache-mode relaxed ...
+
+# Strict: Any change invalidates cache
+schema-travels analyze --cache-mode strict ...
+```
+
+## Key Data Models
+
+### DynamoDB Models (v2.0.0)
+
+```python
+class DesignMode(Enum):
+    SINGLE_TABLE = "single_table"
+    MULTI_TABLE = "multi_table"
+    AUTO = "auto"
+
+class ProjectionType(Enum):
+    KEYS_ONLY = "KEYS_ONLY"
+    INCLUDE = "INCLUDE"
+    ALL = "ALL"
+
+class DynamoDBDesign(BaseModel):
+    design_mode: DesignMode
+    confidence: float
+    entities: list[EntityDefinition]
+    gsis: list[GSIDefinition]
+    clusters: list[AccessCluster]
+    orphan_tables: list[str]
+    warnings: list[str]
+    ai_reviewed: bool = False
+    ai_review_applied: bool = False
+```
+
+### DynamoDB Review Models (v2.0.1)
+
+```python
+class DynamoDBReview(BaseModel):
+    approved: bool
+    confidence: float
+    summary: str
+    entity_changes: list[EntityChange]
+    gsi_changes: list[GSIChange]
+    warnings: list[str]
+    suggestions: list[str]
+    
+    @property
+    def has_changes(self) -> bool
+    
+    @property
+    def change_count(self) -> int
+```
+
+## Algorithm Details
+
+### DynamoDB Access Clustering
+
+```python
+# Union-Find to group co-accessed tables
+CO_ACCESS_THRESHOLD = 0.70
+
+for join in join_patterns:
+    if join.co_access_ratio > CO_ACCESS_THRESHOLD:
+        union(join.table_a, join.table_b)
+
+# Tables in same cluster → single-table candidates
+# Orphan tables → separate tables
+```
+
+### GSI Selection
+
+```python
+GSI_FREQUENCY_THRESHOLD = 5
+MAX_GSIS = 5
+
+for column, frequency in filtered_columns.items():
+    if frequency >= GSI_FREQUENCY_THRESHOLD:
+        if column not in primary_key:
+            create_gsi(column)
+            
+# Projection type based on SELECT patterns:
+# - SELECT * used → ALL
+# - Specific columns → INCLUDE
+# - Only keys → KEYS_ONLY
+```
+
+## Key Decision Rules (MongoDB Embed vs Reference)
 
 ```python
 # Rule 1: Unbounded children → REFERENCE
@@ -185,68 +270,89 @@ else:
 ├── schema_travels.db     # Analysis history (SQLite)
 └── cache/
     ├── index.json        # Cache index with metadata
-    └── <hash>.json       # Cached recommendations per input hash
+    ├── <hash>.json       # Cached MongoDB recommendations
+    └── <hash>_review.json # Cached DynamoDB AI reviews
+```
+
+## Development Commands
+
+```bash
+# Install in dev mode
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Run specific test
+pytest tests/test_dynamodb_review.py -v
+
+# Lint
+ruff check src/
+
+# Format
+ruff format src/
+
+# Type check
+mypy src/schema_travels
 ```
 
 ## Testing Strategy
 
-- **Unit tests**: `tests/test_*.py` - Test individual modules
-- **Fixtures**: `tests/conftest.py` - Shared test data
-- **Example data**: `examples/` - Sample schema and logs for manual testing
+| Test File | Purpose |
+|-----------|---------|
+| `test_dynamodb_designer.py` | Unit tests for clustering algorithm |
+| `test_dynamodb_output.py` | Output formatter tests |
+| `test_dynamodb_review.py` | AI review + apply_review tests |
+| `test_selected_columns.py` | SELECT clause extraction tests |
+| `test_analyzer.py` | Pattern analysis tests |
 
 ## Common Tasks
 
-### Adding a new database type (e.g., Oracle)
-
-1. Create `collector/oracle_log_parser.py` extending `LogParser`
-2. Add Oracle patterns to parse log format
-3. Register in `collector/log_parser.py:get_parser()`
-4. Add CLI option in `cli/main.py`
-
-### Adding a new target (e.g., Cassandra)
+### Adding a new target database (e.g., Cassandra)
 
 1. Add to `recommender/models.py:TargetDatabase` enum
-2. Create generator method in `schema_generator.py`
-3. Add cost model config in `simulator/cost_model.py`
-4. Update CLI choices in `cli/main.py`
+2. Create design models in `recommender/{target}_models.py`
+3. Create designer in `recommender/{target}_designer.py`
+4. Add generator method in `schema_generator.py`
+5. Update CLI in `cli/main.py`
 
-### Modifying recommendation rules
+### Modifying DynamoDB thresholds
 
-1. Edit rules in `analyzer/pattern_analyzer.py:_evaluate_pair()`
-2. For AI-based: Modify prompts in `recommender/claude_advisor.py`
-3. **Important**: Bump `RECOMMENDATION_VERSION` in `recommender/cache.py` to invalidate caches
-
-### Invalidating all caches
-
+Edit constants in `recommender/dynamodb_designer.py`:
 ```python
-from schema_travels.recommender.cache import get_cache
-cache = get_cache()
-cache.invalidate_all()
+CO_ACCESS_THRESHOLD = 0.70
+HOT_JOIN_THRESHOLD = 3
+GSI_FREQUENCY_THRESHOLD = 5
+MAX_GSIS = 5
 ```
 
-Or bump `RECOMMENDATION_VERSION` in `cache.py`.
-
-Or use CLI: `schema-travels clear-cache`
-
-### Changing cache mode at runtime
+### Invalidating caches
 
 ```bash
-# Use strict mode for this run only
-schema-travels analyze --cache-mode strict --logs-dir ./logs --schema-file ./schema.sql
+# Clear all caches via CLI
+schema-travels analyze --clear-cache ...
 
-# Different modes = different cache keys (won't share cache)
+# Or manually
+rm -rf ~/.schema-travels/cache/
+```
+
+### Bumping cache version
+
+Edit `recommender/cache.py`:
+```python
+RECOMMENDATION_VERSION = "2.0.1"  # Bump this
 ```
 
 ## Dependencies
 
 Core:
-- `sqlglot` - SQL parsing
-- `click` - CLI framework
-- `rich` - Terminal formatting
-- `anthropic` - Claude API
-- `pydantic` - Configuration
+- `sqlglot` — SQL parsing
+- `click` — CLI framework
+- `rich` — Terminal formatting
+- `anthropic` — Claude API
+- `pydantic` — Configuration
 
 Dev:
-- `pytest` - Testing
-- `ruff` - Linting/formatting
-- `mypy` - Type checking
+- `pytest` — Testing
+- `ruff` — Linting/formatting
+- `mypy` — Type checking
