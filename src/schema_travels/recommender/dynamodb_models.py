@@ -2,6 +2,8 @@
 
 These models represent the output of DynamoDB schema analysis,
 supporting both single-table and multi-table designs.
+
+v2.0.1: Added DynamoDBReview models for AI review workflow.
 """
 
 from enum import Enum
@@ -313,6 +315,16 @@ class DynamoDBDesign(BaseModel):
         description="Additional optimization suggestions"
     )
     
+    # v2.0.1: AI review metadata
+    ai_reviewed: bool = Field(
+        default=False,
+        description="Whether this design was reviewed by AI"
+    )
+    ai_review_applied: bool = Field(
+        default=False,
+        description="Whether AI suggestions were applied"
+    )
+    
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         result = {
@@ -324,6 +336,8 @@ class DynamoDBDesign(BaseModel):
             "orphan_tables": self.orphan_tables,
             "warnings": self.warnings,
             "recommendations": self.recommendations,
+            "ai_reviewed": self.ai_reviewed,
+            "ai_review_applied": self.ai_review_applied,
         }
         
         if self.design_mode == DesignMode.SINGLE_TABLE:
@@ -368,4 +382,170 @@ class DesignDecision(BaseModel):
             "confidence": self.confidence,
             "alternatives_considered": self.alternatives_considered,
             "data_points": self.data_points,
+        }
+
+
+# =============================================================================
+# v2.0.1: AI Review Models
+# =============================================================================
+
+class ReviewChangeType(str, Enum):
+    """Types of changes Claude can suggest."""
+    MODIFY_PK = "modify_pk"
+    MODIFY_SK = "modify_sk"
+    ADD_ATTRIBUTE = "add_attribute"
+    REMOVE_ATTRIBUTE = "remove_attribute"
+
+
+class GSIChangeAction(str, Enum):
+    """Actions for GSI changes."""
+    ADD = "add"
+    REMOVE = "remove"
+    MODIFY = "modify"
+
+
+class EntityChange(BaseModel):
+    """
+    A suggested change to an entity's design.
+    """
+    entity: str = Field(description="Entity name to modify")
+    change_type: ReviewChangeType = Field(description="Type of change")
+    current_value: Optional[str] = Field(default=None, description="Current value")
+    new_value: str = Field(description="Suggested new value")
+    reason: str = Field(description="Why this change is recommended")
+    
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "entity": self.entity,
+            "change_type": self.change_type.value,
+            "current_value": self.current_value,
+            "new_value": self.new_value,
+            "reason": self.reason,
+        }
+
+
+class GSIChange(BaseModel):
+    """
+    A suggested change to GSIs.
+    """
+    action: GSIChangeAction = Field(description="add, remove, or modify")
+    gsi_name: str = Field(description="GSI name")
+    # For add/modify
+    pk_attribute: Optional[str] = Field(default=None)
+    sk_attribute: Optional[str] = Field(default=None)
+    projection_type: Optional[ProjectionType] = Field(default=None)
+    projected_attributes: list[str] = Field(default_factory=list)
+    access_pattern: Optional[str] = Field(default=None, description="What access pattern this supports")
+    # Explanation
+    reason: str = Field(description="Why this change is recommended")
+    
+    def to_dict(self) -> dict[str, Any]:
+        result = {
+            "action": self.action.value,
+            "gsi_name": self.gsi_name,
+            "reason": self.reason,
+        }
+        if self.pk_attribute:
+            result["pk_attribute"] = self.pk_attribute
+        if self.sk_attribute:
+            result["sk_attribute"] = self.sk_attribute
+        if self.projection_type:
+            result["projection_type"] = self.projection_type.value
+        if self.projected_attributes:
+            result["projected_attributes"] = self.projected_attributes
+        if self.access_pattern:
+            result["access_pattern"] = self.access_pattern
+        return result
+
+
+class DynamoDBReview(BaseModel):
+    """
+    Claude's review of a DynamoDB design.
+    
+    Contains approval status, suggested changes, and warnings.
+    """
+    # Overall assessment
+    approved: bool = Field(
+        description="Whether the design is approved as-is"
+    )
+    confidence: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the review"
+    )
+    summary: str = Field(
+        default="",
+        description="Overall assessment summary"
+    )
+    
+    # Design mode change (rare, but possible)
+    design_mode_change: Optional[DesignMode] = Field(
+        default=None,
+        description="Suggested design mode change (null = keep current)"
+    )
+    design_mode_reason: Optional[str] = Field(
+        default=None,
+        description="Why design mode should change"
+    )
+    
+    # Entity changes
+    entity_changes: list[EntityChange] = Field(
+        default_factory=list,
+        description="Suggested changes to entity PK/SK patterns"
+    )
+    
+    # GSI changes
+    gsi_changes: list[GSIChange] = Field(
+        default_factory=list,
+        description="Suggested GSI additions/removals/modifications"
+    )
+    
+    # Warnings and suggestions
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Potential issues (hot partitions, etc.)"
+    )
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="Optional improvements (TTL, streams, etc.)"
+    )
+    
+    # Access pattern coverage
+    uncovered_patterns: list[str] = Field(
+        default_factory=list,
+        description="Access patterns not well-supported by the design"
+    )
+    
+    @property
+    def has_changes(self) -> bool:
+        """Check if review suggests any changes."""
+        return (
+            self.design_mode_change is not None
+            or len(self.entity_changes) > 0
+            or len(self.gsi_changes) > 0
+        )
+    
+    @property
+    def change_count(self) -> int:
+        """Count total suggested changes."""
+        count = len(self.entity_changes) + len(self.gsi_changes)
+        if self.design_mode_change:
+            count += 1
+        return count
+    
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "approved": self.approved,
+            "confidence": self.confidence,
+            "summary": self.summary,
+            "design_mode_change": self.design_mode_change.value if self.design_mode_change else None,
+            "design_mode_reason": self.design_mode_reason,
+            "entity_changes": [ec.to_dict() for ec in self.entity_changes],
+            "gsi_changes": [gc.to_dict() for gc in self.gsi_changes],
+            "warnings": self.warnings,
+            "suggestions": self.suggestions,
+            "uncovered_patterns": self.uncovered_patterns,
+            "has_changes": self.has_changes,
+            "change_count": self.change_count,
         }

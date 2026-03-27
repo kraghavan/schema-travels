@@ -1,4 +1,8 @@
-"""Recommender module for schema recommendations."""
+"""Recommender module for schema recommendations.
+
+v2.0.0: Added DynamoDB support with single-table design.
+v2.0.1: Added AI review workflow for DynamoDB designs.
+"""
 
 from schema_travels.recommender.claude_advisor import ClaudeAdvisor
 from schema_travels.recommender.schema_generator import SchemaGenerator
@@ -30,9 +34,20 @@ from schema_travels.recommender.dynamodb_models import (
     GSIDefinition,
     DynamoDBDesign,
     TableDesign,
+    # v2.0.1: Review models
+    DynamoDBReview,
+    EntityChange,
+    GSIChange,
+    GSIChangeAction,
+    ReviewChangeType,
 )
 from schema_travels.recommender.dynamodb_designer import DynamoDBDesigner
 from schema_travels.recommender.dynamodb_output import DynamoDBOutputFormatter
+# v2.0.1: Review helpers
+from schema_travels.recommender.dynamodb_review import (
+    apply_review,
+    summarize_review_changes,
+)
 
 __all__ = [
     # Core
@@ -63,4 +78,12 @@ __all__ = [
     "TableDesign",
     "DynamoDBDesigner",
     "DynamoDBOutputFormatter",
+    # v2.0.1: DynamoDB Review
+    "DynamoDBReview",
+    "EntityChange",
+    "GSIChange",
+    "GSIChangeAction",
+    "ReviewChangeType",
+    "apply_review",
+    "summarize_review_changes",
 ]

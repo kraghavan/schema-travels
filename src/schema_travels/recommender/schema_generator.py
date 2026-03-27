@@ -1,7 +1,11 @@
-"""Schema generator module for creating target schema definitions."""
+"""Schema generator module for creating target schema definitions.
+
+v2.0.0: Added DynamoDB single-table design support.
+v2.0.1: Added AI review workflow for DynamoDB designs.
+"""
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from schema_travels.collector.models import SchemaDefinition, TableDefinition
 from schema_travels.analyzer.models import AnalysisResult, TableStatistics
@@ -18,6 +22,7 @@ from schema_travels.recommender.models import (
 from schema_travels.recommender.dynamodb_models import (
     DesignMode,
     DynamoDBDesign,
+    DynamoDBReview,
 )
 from schema_travels.recommender.dynamodb_designer import DynamoDBDesigner
 from schema_travels.recommender.dynamodb_output import DynamoDBOutputFormatter
@@ -65,6 +70,7 @@ class SchemaGenerator:
     optimal target schema definitions.
     
     v2.0.0: Added DynamoDB single-table design support via DynamoDBDesigner.
+    v2.0.1: Added AI review workflow for DynamoDB designs.
     """
 
     def __init__(
@@ -77,6 +83,8 @@ class SchemaGenerator:
         filtered_columns: dict[str, dict[str, int]] | None = None,
         selected_columns: dict[str, dict[str, int]] | None = None,
         select_star_tables: set[str] | None = None,
+        # v2.0.1: AI review for DynamoDB
+        dynamodb_review: Optional[DynamoDBReview] = None,
     ):
         """
         Initialize schema generator.
@@ -84,11 +92,12 @@ class SchemaGenerator:
         Args:
             source_schema: Source database schema
             analysis: Analysis result from pattern analyzer
-            recommendations: Optional pre-computed recommendations
+            recommendations: Optional pre-computed recommendations (used for MongoDB only)
             dynamodb_mode: DynamoDB design mode (AUTO, SINGLE_TABLE, MULTI_TABLE)
             filtered_columns: Column filter frequencies from MutationAnalyzer
             selected_columns: Column select frequencies from MutationAnalyzer
             select_star_tables: Tables with SELECT * usage
+            dynamodb_review: Optional AI review of DynamoDB design (v2.0.1)
         """
         self.source_schema = source_schema
         self.analysis = analysis
@@ -99,6 +108,9 @@ class SchemaGenerator:
         self.filtered_columns = filtered_columns or {}
         self.selected_columns = selected_columns or {}
         self.select_star_tables = select_star_tables or set()
+        
+        # v2.0.1: AI review
+        self.dynamodb_review = dynamodb_review
 
         # Build lookup maps
         self._table_lookup = {t.name.lower(): t for t in source_schema.tables}
@@ -234,8 +246,9 @@ class SchemaGenerator:
 
     def _convert_column(self, col) -> FieldDefinition:
         """Convert SQL column to field definition."""
-        sql_type = col.data_type.lower().split("(")[0].strip()
-        mongo_type = SQL_TO_MONGO_TYPES.get(sql_type, "string")
+        mongo_type = SQL_TO_MONGO_TYPES.get(
+            col.data_type.lower(), "string"
+        )
 
         return FieldDefinition(
             name=col.name,
@@ -246,15 +259,17 @@ class SchemaGenerator:
         )
 
     def _is_fk_column(self, table_name: str, column_name: str) -> bool:
-        """Check if a column is a foreign key column."""
+        """Check if a column is a foreign key."""
         for fk in self.source_schema.foreign_keys:
-            if fk.from_table.lower() == table_name.lower():
-                if column_name.lower() in [c.lower() for c in fk.from_columns]:
-                    return True
+            if (
+                fk.from_table.lower() == table_name.lower()
+                and column_name in fk.from_columns
+            ):
+                return True
         return False
 
     # =========================================================================
-    # v2.0.0: Enhanced DynamoDB Schema Generation
+    # v2.0.0: DynamoDB Schema Generation
     # =========================================================================
 
     def _generate_dynamodb_schema(self) -> TargetSchema:
@@ -262,6 +277,8 @@ class SchemaGenerator:
         Generate DynamoDB schema using DynamoDBDesigner.
         
         v2.0.0: Uses access cluster analysis for single-table design.
+        v2.0.1: Applies AI review if provided. Does NOT include MongoDB-style
+                recommendations - DynamoDB design is in metadata.dynamodb_design.
         """
         # Build table statistics if not already in analysis
         table_stats = self._build_table_stats()
@@ -272,7 +289,7 @@ class SchemaGenerator:
             co_access_threshold=0.70,
         )
         
-        # Generate DynamoDB design
+        # Generate DynamoDB design (algorithmic)
         design = designer.design(
             table_stats=table_stats,
             access_patterns=self.analysis.access_patterns,
@@ -282,6 +299,15 @@ class SchemaGenerator:
             selected_columns=self.selected_columns,
             select_star_tables=self.select_star_tables,
         )
+        
+        # v2.0.1: Apply AI review if provided
+        if self.dynamodb_review is not None:
+            from schema_travels.recommender.dynamodb_review import apply_review
+            design = apply_review(design, self.dynamodb_review)
+            logger.info(f"Applied AI review: {self.dynamodb_review.change_count} changes")
+        
+        # Convert DynamoDB design to TargetSchema for compatibility
+        return self._dynamodb_design_to_target_schema(design)
         
         # Convert DynamoDB design to TargetSchema for compatibility
         return self._dynamodb_design_to_target_schema(design)
@@ -352,7 +378,13 @@ class SchemaGenerator:
         self,
         design: DynamoDBDesign,
     ) -> TargetSchema:
-        """Convert DynamoDBDesign to TargetSchema for API compatibility."""
+        """
+        Convert DynamoDBDesign to TargetSchema for API compatibility.
+        
+        v2.0.1 FIX: Does NOT include MongoDB-style recommendations.
+        For DynamoDB, the design is fully contained in metadata.dynamodb_design.
+        The 'recommendations' field is empty for DynamoDB targets.
+        """
         collections: list[CollectionDefinition] = []
         warnings: list[str] = list(design.warnings)
         
@@ -377,10 +409,13 @@ class SchemaGenerator:
                     self._table_design_to_collection(table_design)
                 )
         
+        # v2.0.1 FIX: Empty recommendations for DynamoDB!
+        # MongoDB concepts like EMBED/REFERENCE don't apply to DynamoDB.
+        # The full design is in metadata.dynamodb_design.
         return TargetSchema(
             target_type=TargetDatabase.DYNAMODB,
             collections=collections,
-            recommendations=self.recommendations,
+            recommendations=[],  # v2.0.1: Empty! DynamoDB design is in metadata.
             warnings=warnings,
             metadata={
                 "source_tables": len(self.source_schema.tables),

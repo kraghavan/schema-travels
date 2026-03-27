@@ -255,8 +255,115 @@ def analyze(
             recommendations = []
             cache_used = False
             valid_recs = []  # Initialize here for use later
+            dynamodb_review = None  # v2.0.1: AI review for DynamoDB
             
-            if use_ai:
+            # v2.0.1: Different AI flow for DynamoDB vs MongoDB
+            if target_db == TargetDatabase.DYNAMODB:
+                # DynamoDB: Local design + optional AI review
+                if use_ai:
+                    settings = get_settings()
+                    if settings.has_api_key():
+                        # First, generate local design to review
+                        task = progress.add_task("Generating DynamoDB design...", total=None)
+                        
+                        # Build table stats for designer
+                        table_stats = []
+                        for ts in result.table_statistics:
+                            table_selected = mutation_analyzer.selected_columns.get(ts.table, {}) if mutation_analyzer else {}
+                            sorted_selected = sorted(table_selected.items(), key=lambda x: x[1], reverse=True)
+                            from schema_travels.analyzer.models import TableStatistics
+                            table_stats.append(TableStatistics(
+                                table=ts.table,
+                                total_accesses=ts.total_accesses,
+                                solo_accesses=ts.solo_accesses,
+                                joined_accesses=ts.joined_accesses,
+                                total_time_ms=ts.total_time_ms,
+                                frequently_filtered_columns=ts.frequently_filtered_columns,
+                                frequently_updated_columns=ts.frequently_updated_columns,
+                                frequently_selected_columns=[col for col, _ in sorted_selected[:10]],
+                                has_select_star=ts.table in (mutation_analyzer.select_star_tables if mutation_analyzer else set()),
+                            ))
+                        
+                        # Create local design
+                        from schema_travels.recommender.dynamodb_designer import DynamoDBDesigner
+                        designer = DynamoDBDesigner(
+                            mode=dynamo_design_mode,
+                            co_access_threshold=0.70,
+                        )
+                        local_design = designer.design(
+                            table_stats=table_stats,
+                            access_patterns=result.access_patterns,
+                            join_patterns=result.join_patterns,
+                            mutation_patterns=result.mutation_patterns,
+                            filtered_columns=dict(mutation_analyzer.filtered_columns) if mutation_analyzer else {},
+                            selected_columns=dict(mutation_analyzer.selected_columns) if mutation_analyzer else {},
+                            select_star_tables=mutation_analyzer.select_star_tables if mutation_analyzer else set(),
+                        )
+                        progress.update(task, completed=True)
+                        console.print(f"  Local design: [bold]{local_design.design_mode.value}[/bold] (confidence: {local_design.confidence:.0%})")
+                        
+                        # Compute cache key for review
+                        mode = CacheMode(cache_mode)
+                        input_hash = compute_input_hash(schema, result, target_db, mode) + "_review"
+                        
+                        # Check cache for review
+                        cached_review = None
+                        if not no_cache:
+                            task = progress.add_task("Checking review cache...", total=None)
+                            cached_review = cache.get(input_hash)
+                            progress.update(task, completed=True)
+                            
+                            if cached_review:
+                                # Reconstruct review from cached dict
+                                from schema_travels.recommender.dynamodb_models import DynamoDBReview
+                                try:
+                                    dynamodb_review = DynamoDBReview(**cached_review)
+                                    cache_used = True
+                                    console.print(f"  [green]✓ Using cached AI review[/green] [dim](hash: {input_hash})[/dim]")
+                                except Exception as e:
+                                    logger.warning(f"Failed to load cached review: {e}")
+                                    cached_review = None
+                        
+                        # If not cached, get AI review
+                        if not cached_review:
+                            try:
+                                task = progress.add_task("Getting AI review of design...", total=None)
+                                advisor = ClaudeAdvisor()
+                                dynamodb_review = advisor.review_dynamodb_design(
+                                    local_design, result, schema
+                                )
+                                progress.update(task, completed=True)
+                                
+                                # Cache the review
+                                cache.put(input_hash, dynamodb_review.to_dict(), metadata={
+                                    "analysis_id": analysis_id,
+                                    "design_mode": local_design.design_mode.value,
+                                    "cache_mode": cache_mode,
+                                })
+                                console.print(f"  [dim]Cached AI review (hash: {input_hash})[/dim]")
+                                
+                                # Show review summary
+                                if dynamodb_review.approved:
+                                    if dynamodb_review.has_changes:
+                                        console.print(f"  [green]✓ AI approved with {dynamodb_review.change_count} suggestions[/green]")
+                                    else:
+                                        console.print(f"  [green]✓ AI approved design (no changes)[/green]")
+                                else:
+                                    console.print(f"  [yellow]⚠ AI flagged issues ({dynamodb_review.change_count} changes suggested)[/yellow]")
+                                
+                            except APIKeyNotConfiguredError as e:
+                                console.print(e.message)
+                                sys.exit(1)
+                            except Exception as e:
+                                console.print(f"  [yellow]⚠ AI review failed: {e}[/yellow]")
+                                console.print(f"  [dim]Continuing with local design only[/dim]")
+                    else:
+                        console.print("[yellow]⚠ API key not configured, using algorithmic design only[/yellow]")
+                        console.print("[dim]  Set ANTHROPIC_API_KEY for AI review[/dim]")
+                else:
+                    console.print("  [dim]DynamoDB mode: Using algorithmic design (--no-ai)[/dim]")
+                    
+            elif use_ai:
                 settings = get_settings()
                 
                 # Check if API key is configured
@@ -366,6 +473,7 @@ def analyze(
             task = progress.add_task("Generating target schema...", total=None)
             
             # v2.0.0: Pass DynamoDB-specific options to SchemaGenerator
+            # v2.0.1: Also pass AI review for DynamoDB
             if target_db == TargetDatabase.DYNAMODB and mutation_analyzer:
                 generator = SchemaGenerator(
                     schema, 
@@ -375,6 +483,16 @@ def analyze(
                     filtered_columns=dict(mutation_analyzer.filtered_columns),
                     selected_columns=dict(mutation_analyzer.selected_columns),
                     select_star_tables=mutation_analyzer.select_star_tables,
+                    dynamodb_review=dynamodb_review,  # v2.0.1: AI review
+                )
+            elif target_db == TargetDatabase.DYNAMODB:
+                # DynamoDB without mutation analyzer (shouldn't happen, but handle it)
+                generator = SchemaGenerator(
+                    schema, 
+                    result, 
+                    valid_recs,
+                    dynamodb_mode=dynamo_design_mode,
+                    dynamodb_review=dynamodb_review,
                 )
             else:
                 generator = SchemaGenerator(schema, result, valid_recs)
@@ -384,10 +502,22 @@ def analyze(
             progress.update(task, completed=True)
             
             # v2.0.0: Show DynamoDB design mode in output
+            # v2.0.1: Also show AI review status
             if target_db == TargetDatabase.DYNAMODB:
                 design_mode = target_schema.metadata.get("design_mode", "unknown")
                 confidence = target_schema.metadata.get("confidence", 0)
-                console.print(f"  DynamoDB design: [bold]{design_mode}[/bold] (confidence: {confidence:.0%})")
+                dynamodb_design = target_schema.metadata.get("dynamodb_design", {})
+                ai_reviewed = dynamodb_design.get("ai_reviewed", False)
+                ai_applied = dynamodb_design.get("ai_review_applied", False)
+                
+                review_status = ""
+                if ai_reviewed:
+                    if ai_applied:
+                        review_status = " [green](AI reviewed + applied)[/green]"
+                    else:
+                        review_status = " [dim](AI reviewed)[/dim]"
+                        
+                console.print(f"  DynamoDB design: [bold]{design_mode}[/bold] (confidence: {confidence:.0%}){review_status}")
 
         # Display results
         _display_analysis_summary(
@@ -436,9 +566,15 @@ def analyze(
                     "cache_used": cache_used,
                     "cache_mode": cache_mode,
                     "analysis": result.to_dict(),
-                    "recommendations": [r.to_dict() if hasattr(r, 'to_dict') else r for r in recommendations],
                     "target_schema": target_schema.to_dict(),
                 }
+                # v2.0.1: Only include recommendations for MongoDB
+                # For DynamoDB, the design is in target_schema.metadata.dynamodb_design
+                if target_db == TargetDatabase.MONGODB:
+                    output_data["recommendations"] = [
+                        r.to_dict() if hasattr(r, 'to_dict') else r 
+                        for r in recommendations
+                    ]
                 with open(output, "w") as f:
                     json.dump(output_data, f, indent=2)
                 console.print(f"\n[green]Results saved to {output}[/green]")
@@ -913,8 +1049,9 @@ def _display_analysis_summary(
     # v2.0.0: DynamoDB-specific output
     if target_db == TargetDatabase.DYNAMODB:
         _display_dynamodb_summary(target_schema)
+        return  # v2.0.1: Don't show MongoDB-style recommendations for DynamoDB
 
-    # Recommendations
+    # Recommendations (MongoDB only)
     if recommendations:
         # Convert to consistent format and filter by confidence
         from schema_travels.recommender.models import SchemaRecommendation, RelationshipDecision
