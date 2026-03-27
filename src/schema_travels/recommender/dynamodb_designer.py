@@ -205,18 +205,25 @@ class DynamoDBDesigner:
         raw_clusters = uf.get_clusters()
         clusters = []
         
-        for cluster_id, (root, members) in enumerate(raw_clusters.items()):
+        # Sort by root name for deterministic cluster_id assignment
+        sorted_roots = sorted(raw_clusters.keys())
+        
+        for cluster_id, root in enumerate(sorted_roots):
+            members = raw_clusters[root]
+            # Convert to sorted list for deterministic iteration
+            members_list = sorted(members)
+            
             # Find PK table (highest solo_access_ratio)
             pk_table = max(
-                members,
+                members_list,
                 key=lambda t: stats_map.get(t, TableStatistics(table=t)).solo_ratio
             )
             
-            # SK tables are others with significant joined accesses
-            sk_tables = [
-                t for t in members
+            # SK tables are others with significant joined accesses (sorted)
+            sk_tables = sorted([
+                t for t in members_list
                 if t != pk_table and stats_map.get(t, TableStatistics(table=t)).joined_accesses > 0
-            ]
+            ])
             
             # Calculate average co-access strength within cluster
             cluster_co_access = []
@@ -229,12 +236,12 @@ class DynamoDBDesigner:
             # Total accesses in cluster
             total_accesses = sum(
                 stats_map.get(t, TableStatistics(table=t)).total_accesses
-                for t in members
+                for t in members_list
             )
             
             clusters.append(AccessCluster(
                 cluster_id=f"cluster_{cluster_id}",
-                tables=members,
+                tables=members_list,  # Use sorted list for deterministic order
                 pk_table=pk_table,
                 sk_tables=sk_tables,
                 co_access_strength=avg_strength,
@@ -390,10 +397,10 @@ class DynamoDBDesigner:
             stats_map=stats_map,
         )
         
-        # Identify orphan tables (not in primary cluster)
+        # Identify orphan tables (not in primary cluster) - sorted for deterministic order
         all_tables = set(stats_map.keys())
-        clustered_tables = primary_cluster.tables
-        orphan_tables = list(all_tables - clustered_tables)
+        clustered_tables = set(primary_cluster.tables)
+        orphan_tables = sorted(all_tables - clustered_tables)
         
         # Generate warnings
         warnings = self._generate_warnings(
@@ -470,9 +477,9 @@ class DynamoDBDesigner:
                 attributes=stats_map.get(sk_table, TableStatistics(table=sk_table)).frequently_selected_columns[:10],
             ))
         
-        # Tables in cluster but not PK or SK
-        remaining = cluster.tables - {pk_table} - set(cluster.sk_tables)
-        for table in remaining:
+        # Tables in cluster but not PK or SK (sorted for deterministic order)
+        remaining = set(cluster.tables) - {pk_table} - set(cluster.sk_tables)
+        for table in sorted(remaining):
             entity_name = self._to_entity_name(table)
             entities.append(EntityDefinition(
                 name=entity_name,
@@ -518,8 +525,9 @@ class DynamoDBDesigner:
         """Generate multi-table design."""
         tables = []
         
-        # Each table gets its own DynamoDB table
-        for table_name, stats in stats_map.items():
+        # Each table gets its own DynamoDB table (sorted for deterministic output)
+        for table_name in sorted(stats_map.keys()):
+            stats = stats_map[table_name]
             # Determine PK (usually 'id')
             pk = "id"
             

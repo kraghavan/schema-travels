@@ -244,7 +244,7 @@ class MutationAnalyzer:
             # Handle table.* (e.g., SELECT users.*)
             if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star):
                 table_name = expr.table.lower() if expr.table else None
-                if table_name:
+                if table_name and table_name in tables:
                     self.select_star_tables.add(table_name)
                 continue
                 
