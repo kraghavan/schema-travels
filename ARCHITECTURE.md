@@ -21,8 +21,15 @@ flowchart LR
         R --> S
     end
 
-    subgraph External
-        CLAUDE["Claude API"]
+    subgraph LLM["LLM Providers (v2.3.0)"]
+        CLAUDE["Claude"]
+        OPENAI["OpenAI"]
+        GEMINI["Gemini"]
+        GROK["Grok"]
+        OLLAMA["Ollama"]
+    end
+
+    subgraph Storage
         CACHE[("🔄 Cache")]
         DB[("💾 SQLite")]
     end
@@ -36,6 +43,10 @@ flowchart LR
     LOGS --> C
     SCHEMA --> C
     R <--> CLAUDE
+    R <--> OPENAI
+    R <--> GEMINI
+    R <--> GROK
+    R <--> OLLAMA
     R <--> CACHE
     Core --> DB
     S --> REPORT
@@ -43,11 +54,73 @@ flowchart LR
     R --> DYNAMO
 ```
 
+## LLM Provider Layer (v2.3.0)
+
+```mermaid
+flowchart TB
+    subgraph CLI["CLI Layer"]
+        FLAGS["--provider / --model / --ollama-host"]
+    end
+
+    subgraph Factory["LLM Factory"]
+        GP["get_provider()"]
+        LP["list_providers()"]
+        GI["get_provider_info()"]
+    end
+
+    subgraph Protocol["LLMProvider Protocol"]
+        COMPLETE["complete(prompt) → str"]
+        CHAT["chat(messages) → str"]
+        PROPS["provider_name / model"]
+    end
+
+    subgraph Providers["Provider Implementations"]
+        CP["ClaudeProvider"]
+        OP["OpenAIProvider"]
+        GEMP["GeminiProvider"]
+        GRP["GrokProvider"]
+        OLP["OllamaProvider"]
+    end
+
+    subgraph Advisor["Advisor Layer"]
+        ADV["Advisor"]
+        CA["ClaudeAdvisor (alias)"]
+    end
+
+    FLAGS --> GP
+    GP --> Protocol
+    Protocol --> CP
+    Protocol --> OP
+    Protocol --> GEMP
+    Protocol --> GRP
+    Protocol --> OLP
+    ADV --> Protocol
+    CA --> ADV
+```
+
+### Provider Configuration
+
+| Provider | Default Model | API Key Env Var | Base URL |
+|----------|--------------|-----------------|----------|
+| Claude | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` |
+| OpenAI | `gpt-4o` | `OPENAI_API_KEY` | `https://api.openai.com` |
+| Gemini | `gemini-2.0-flash` | `GOOGLE_API_KEY` | Google AI SDK |
+| Grok | `grok-3` | `XAI_API_KEY` | `https://api.x.ai/v1` |
+| Ollama | `llama3.1:8b` | None | `http://localhost:11434` |
+
+### Environment Variables
+
+```bash
+SCHEMA_TRAVELS_PROVIDER=openai    # Default provider
+SCHEMA_TRAVELS_MODEL=gpt-4o       # Default model
+OLLAMA_HOST=http://localhost:11434
+```
+
 ## Target-Specific Data Flows
 
 ### MongoDB Flow
 
-Claude acts as **architect** — designs the schema from scratch.
+LLM acts as **architect** — designs the schema from scratch.
 
 ```mermaid
 flowchart TB
@@ -62,8 +135,8 @@ flowchart TB
         MP["Mutation Patterns"]
     end
 
-    subgraph AI["Claude AI (Architect)"]
-        CA["ClaudeAdvisor.get_recommendations()"]
+    subgraph AI["LLM (Architect)"]
+        ADV["Advisor.get_recommendations()"]
         REC["EMBED / REFERENCE decisions"]
     end
 
@@ -76,16 +149,16 @@ flowchart TB
     SCHEMA --> PA
     PA --> JP
     PA --> MP
-    JP --> CA
-    MP --> CA
-    CA --> REC
+    JP --> ADV
+    MP --> ADV
+    ADV --> REC
     REC --> SG
     SG --> TS
 ```
 
 ### DynamoDB Flow (v2.0.0+)
 
-Claude acts as **reviewer** — validates and refines local algorithmic design.
+LLM acts as **reviewer** — validates and refines local algorithmic design.
 
 ```mermaid
 flowchart TB
@@ -109,8 +182,8 @@ flowchart TB
         GSI["GSI Candidates"]
     end
 
-    subgraph AIReview["Claude AI (Reviewer)"]
-        CR["ClaudeAdvisor.review_dynamodb_design()"]
+    subgraph AIReview["LLM (Reviewer)"]
+        CR["Advisor.review_dynamodb_design()"]
         REV["DynamoDBReview"]
         AR["apply_review()"]
     end
@@ -148,6 +221,19 @@ flowchart TB
 
 ## Module Details
 
+### LLM Module (`llm/`) — v2.3.0
+
+| File | Purpose |
+|------|---------|
+| `__init__.py` | Public API exports |
+| `provider.py` | `LLMProvider` protocol, `LLMResponse`, exceptions |
+| `factory.py` | `get_provider()`, `list_providers()`, `get_provider_info()` |
+| `providers/claude.py` | Claude (Anthropic) implementation |
+| `providers/openai.py` | OpenAI implementation |
+| `providers/gemini.py` | Google Gemini implementation |
+| `providers/grok.py` | xAI Grok implementation |
+| `providers/ollama.py` | Ollama (local) implementation |
+
 ### Collector (`collector/`)
 
 | File | Purpose |
@@ -169,7 +255,8 @@ flowchart TB
 
 | File | Purpose |
 |------|---------|
-| `claude_advisor.py` | AI recommendations (MongoDB) + **v2.0.1**: AI review (DynamoDB) |
+| `advisor.py` | **v2.3.0**: Provider-agnostic AI advisor |
+| `claude_advisor.py` | Backwards-compatible alias → Advisor |
 | `schema_generator.py` | Generate MongoDB/DynamoDB schemas |
 | `cache.py` | Hash-based recommendation caching |
 | `query_rewriter.py` | SQL → MongoDB query rewrite examples |
@@ -270,8 +357,8 @@ flowchart LR
     HASH["SHA256 Hash<br/>(first 16 chars)"]
     CHECK{"Cache<br/>exists?"}
     HIT["Return cached<br/>recommendations"]
-    MISS["Call Claude API"]
-    STORE["Store in cache"]
+    MISS["Call LLM API"]
+    STORE["Store in cache<br/>(includes provider/model)"]
     OUTPUT["Recommendations"]
 
     INPUT --> HASH
@@ -291,6 +378,18 @@ flowchart LR
 | DynamoDB | `{hash}` | Not used (algorithmic design) |
 | DynamoDB | `{hash}_review` | AI review of local design |
 
+### Cache Metadata (v2.3.0)
+
+Cache entries now include provider and model:
+```json
+{
+  "analysis_id": "abc123",
+  "cache_mode": "relaxed",
+  "provider": "openai",
+  "model": "gpt-4o"
+}
+```
+
 ### Cache Invalidation
 
 Cache entries are invalidated when:
@@ -301,7 +400,7 @@ Cache entries are invalidated when:
 
 ## AI Integration Patterns
 
-### MongoDB: Claude as Architect
+### MongoDB: LLM as Architect
 
 ```
 Input:  Schema + Access Patterns
@@ -309,7 +408,7 @@ Prompt: "Design optimal MongoDB schema"
 Output: EMBED/REFERENCE decisions per relationship
 ```
 
-### DynamoDB: Claude as Reviewer
+### DynamoDB: LLM as Reviewer
 
 ```
 Input:  Local design from DynamoDBDesigner

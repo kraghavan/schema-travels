@@ -3,9 +3,13 @@
 Analyzes database query patterns to recommend optimal MongoDB schema design.
 """
 
-__version__ = "2.0.0"
-__author__ = "Karthik Raghavan"
+from importlib.metadata import version, metadata, PackageNotFoundError
 
-from schema_travels.config import get_settings
-
-__all__ = ["__version__", "get_settings"]
+try:
+    __version__ = version("schema-travels")
+    _meta = metadata("schema-travels")
+    __author__ = _meta.get("Author", "")
+    
+except PackageNotFoundError:
+    __version__ = "0.0.0.dev0"
+    __author__ = "Karthika Raghavan"

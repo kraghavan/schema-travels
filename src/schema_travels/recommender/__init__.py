@@ -2,9 +2,10 @@
 
 v2.0.0: Added DynamoDB support with single-table design.
 v2.0.1: Added AI review workflow for DynamoDB designs.
+v2.3.0: Added multi-provider LLM support (Claude, OpenAI, Gemini, Grok, Ollama).
 """
-
-from schema_travels.recommender.claude_advisor import ClaudeAdvisor
+from schema_travels.recommender.advisor import Advisor
+from schema_travels.recommender.claude_advisor import ClaudeAdvisor  # Backwards compat
 from schema_travels.recommender.schema_generator import SchemaGenerator
 from schema_travels.recommender.models import (
     TargetDatabase,
@@ -50,8 +51,9 @@ from schema_travels.recommender.dynamodb_review import (
 )
 
 __all__ = [
-    # Core
-    "ClaudeAdvisor",
+    # Core - v2.3.0: Advisor is primary, ClaudeAdvisor is alias
+    "Advisor",
+    "ClaudeAdvisor",  # Backwards compatibility
     "SchemaGenerator",
     "TargetDatabase",
     "RelationshipDecision",

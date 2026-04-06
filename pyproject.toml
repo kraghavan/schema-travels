@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "schema-travels"
-version = "2.0.0"
-description = "Intelligent SQL to NoSQL schema migration - analyzes query patterns to recommend optimal MongoDB schema design"
+version = "2.3.0"
+description = "Intelligent SQL to NoSQL schema migration - analyzes query patterns to recommend optimal MongoDB/DynamoDB schema design with multi-LLM provider support"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -20,6 +20,7 @@ keywords = [
     "migration", 
     "nosql",
     "mongodb",
+    "dynamodb",
     "postgresql",
     "mysql",
     "schema",
@@ -27,8 +28,12 @@ keywords = [
     "data-modeling",
     "etl",
     "ai",
+    "llm",
     "claude",
-    "llm"
+    "openai",
+    "gemini",
+    "grok",
+    "ollama"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -56,9 +61,19 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    "httpx>=0.25.0",  # For Ollama provider
+    "openai>=1.0.0",
+    "google-generativeai>=0.3.0",
+
 ]
 
 [project.optional-dependencies]
+# Individual LLM providers
+openai = ["openai>=1.0.0"]
+gemini = ["google-generativeai>=0.3.0"]
+grok = ["openai>=1.0.0"]  # Grok uses OpenAI-compatible API
+
+# Development dependencies
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",

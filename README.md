@@ -9,7 +9,7 @@
 ## Features
 
 - 📊 **Query Pattern Analysis** — Parse PostgreSQL/MySQL logs to detect hot joins, access patterns, and read/write ratios
-- 🤖 **AI-Powered Recommendations** — Claude AI designs MongoDB schemas and reviews DynamoDB designs
+- 🤖 **Multi-Provider AI** — Claude, OpenAI, Gemini, Grok, or local Ollama models
 - 🗃️ **DynamoDB Single-Table Design** — Algorithmic clustering with Union-Find, automatic PK/SK patterns, GSI optimization
 - 📄 **Multiple Output Formats** — JSON, Terraform HCL, NoSQL Workbench
 - 🔄 **SQL → MongoDB Rewrites** — Automatic query rewrite examples
@@ -19,24 +19,33 @@
 ## Installation
 
 ```bash
+# Core (includes Claude support)
 pip install schema-travels
+
+# With OpenAI support
+pip install schema-travels[openai]
+
+# With Google Gemini support
+pip install schema-travels[gemini]
+
+# All cloud providers
+pip install schema-travels[all-providers]
 ```
 
-### 🔑 Review of Schema by AI
+## LLM Providers (v2.3.0)
 
-So Please remember that Frontier Model Claude and its API key is required to use this tool. 
+| Provider | Default Model | API Key | Install |
+|----------|--------------|---------|---------|
+| **Claude** | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` | Built-in |
+| **OpenAI** | `gpt-4o` | `OPENAI_API_KEY` | `[openai]` |
+| **Gemini** | `gemini-2.0-flash` | `GOOGLE_API_KEY` | `[gemini]` |
+| **Grok** | `grok-3` | `XAI_API_KEY` | `[openai]` |
+| **Ollama** | `llama3.1:8b` | None (local) | Built-in |
+
+```bash
+# List available providers
+schema-travels providers
 ```
-╭─────────────────────────────────────────────────────────────────────╮
-│                    ⚠️  API KEY NOT CONFIGURED                       │
-├─────────────────────────────────────────────────────────────────────┤
-│  Schema Travels requires an Anthropic API key for AI-powered        │
-│  schema recommendations.                                            │
-│                                                                     │
-│  Option 1: export ANTHROPIC_API_KEY=sk-ant-xxxxx                    │
-│  Option 2: echo "ANTHROPIC_API_KEY=sk-ant-xxxxx" > .env             │
-│                                                                     │
-│  Get your API key at: https://console.anthropic.com/settings/keys   │
-╰─────────────────────────────────────────────────────────────────────╯
 
 ## Quick Start
 
@@ -63,22 +72,59 @@ schema-travels analyze \
     --output results.json
 ```
 
+### Using Different LLM Providers
+
+```bash
+# OpenAI GPT-4o
+export OPENAI_API_KEY=sk-...
+schema-travels analyze --provider openai --logs-dir ./logs --schema-file ./schema.sql
+
+# Google Gemini
+export GOOGLE_API_KEY=...
+schema-travels analyze --provider gemini --model gemini-2.5-pro ...
+
+# xAI Grok
+export XAI_API_KEY=...
+schema-travels analyze --provider grok ...
+
+# Local Ollama (free, private)
+ollama serve  # Start Ollama server
+schema-travels analyze --provider ollama --model llama3.1:70b ...
+
+# Remote Ollama server
+schema-travels analyze --provider ollama --model mistral:7b \
+    --ollama-host http://192.168.1.100:11434 ...
+```
+
+### Environment Variables
+
+```bash
+# Set default provider (instead of --provider flag)
+export SCHEMA_TRAVELS_PROVIDER=openai
+
+# Set default model (instead of --model flag)
+export SCHEMA_TRAVELS_MODEL=gpt-4o-mini
+
+# Ollama server URL
+export OLLAMA_HOST=http://localhost:11434
+```
+
 ## How It Works
 
 ### MongoDB Flow
 
-Claude AI acts as **architect** — analyzes your access patterns and designs the schema:
+LLM acts as **architect** — analyzes your access patterns and designs the schema:
 
 ```
-SQL Schema + Query Logs → Pattern Analysis → Claude AI → EMBED/REFERENCE Decisions → MongoDB Schema
+SQL Schema + Query Logs → Pattern Analysis → LLM → EMBED/REFERENCE Decisions → MongoDB Schema
 ```
 
 ### DynamoDB Flow
 
-Local algorithm designs, Claude AI **reviews**:
+Local algorithm designs, LLM **reviews**:
 
 ```
-SQL Schema + Query Logs → Pattern Analysis → DynamoDB Designer → Claude Review → Final Design
+SQL Schema + Query Logs → Pattern Analysis → DynamoDB Designer → LLM Review → Final Design
                                                     │
                                             Union-Find clustering
                                             PK/SK pattern generation
@@ -95,6 +141,11 @@ Options:
   --schema-file PATH           SQL schema file [required]
   --target [mongodb|dynamodb]  Target database [default: mongodb]
   --output PATH                Output file
+  
+  # LLM Provider (v2.3.0)
+  --provider [claude|openai|gemini|grok|ollama]  LLM provider
+  --model TEXT                 Model to use (overrides provider default)
+  --ollama-host TEXT           Ollama server URL
   
   # DynamoDB-specific
   --dynamodb-mode [auto|single|multi]     Design mode [default: auto]
@@ -186,7 +237,7 @@ open schema.html
 ## Requirements
 
 - Python 3.10+
-- Anthropic API key (for AI recommendations)
+- LLM API key (Claude, OpenAI, Gemini, or Grok) OR local Ollama installation
 
 ## License
 

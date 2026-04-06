@@ -1,9 +1,15 @@
-"""Main CLI entry point for Schema Travels."""
+"""Main CLI entry point for Schema Travels.
+
+v2.0.0: Added DynamoDB support with single-table design.
+v2.0.1: Added AI review workflow for DynamoDB designs.
+v2.3.0: Added multi-provider LLM support (Claude, OpenAI, Gemini, Grok, Ollama).
+"""
 
 import json
 import logging
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -16,14 +22,22 @@ from schema_travels import __version__
 from schema_travels.config import get_settings, APIKeyNotConfiguredError
 from schema_travels.collector import PostgresLogParser, MySQLLogParser, SchemaParser
 from schema_travels.analyzer import PatternAnalyzer, MutationAnalyzer
-from schema_travels.recommender import ClaudeAdvisor, SchemaGenerator, generate_rewrites
-from schema_travels.recommender.models import TargetDatabase
-from schema_travels.recommender.cache import compute_input_hash, get_cache, CacheMode
+# v2.3.0: Use Advisor instead of ClaudeAdvisor
+from schema_travels.recommender import Advisor, SchemaGenerator, generate_rewrites
+from schema_travels.recommender.models import TargetDatabase, SchemaRecommendation, RelationshipDecision
+from schema_travels.recommender.cache import compute_input_hash, get_cache, CacheMode, RECOMMENDATION_VERSION
 # v2.0.0: DynamoDB imports
-from schema_travels.recommender.dynamodb_models import DesignMode
-from schema_travels.recommender.dynamodb_output import DynamoDBOutputFormatter
+from schema_travels.recommender.dynamodb_models import DesignMode, DynamoDBReview
 from schema_travels.simulator import MigrationSimulator, SimulationConfig
 from schema_travels.persistence import Database, AnalysisRepository
+# v2.3.0: Multi-provider LLM support
+from schema_travels.llm import (
+    get_provider,
+    list_providers,
+    get_provider_info,
+    LLMProviderError,
+    APIKeyMissingError,
+)
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -46,9 +60,58 @@ def cli(verbose: bool) -> None:
 
     Analyze your database access patterns and get recommendations
     for optimal NoSQL schema design.
+    
+    v2.3.0: Now supports multiple LLM providers. Use --provider to select:
+    claude (default), openai, gemini, grok, ollama
     """
     setup_logging(verbose)
 
+
+# =============================================================================
+# v2.3.0: New providers command
+# =============================================================================
+
+@cli.command()
+def providers() -> None:
+    """List available LLM providers and their configuration.
+    
+    Shows all supported LLM providers, their default models,
+    required environment variables, and installation instructions.
+    """
+    table = Table(title="Available LLM Providers (v2.3.0)")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Default Model", style="green")
+    table.add_column("API Key Env Var", style="yellow")
+    table.add_column("Install", style="dim")
+    
+    for provider_name in list_providers():
+        info = get_provider_info(provider_name)
+        env_vars = ", ".join(info.get("env_vars", []))
+        table.add_row(
+            provider_name,
+            info.get("default_model", ""),
+            env_vars,
+            info.get("install", ""),
+        )
+    
+    console.print(table)
+    
+    console.print("\n[bold]Usage Examples:[/bold]")
+    console.print("  schema-travels analyze --provider claude --schema ./schema.sql ...")
+    console.print("  schema-travels analyze --provider openai --model gpt-4o-mini ...")
+    console.print("  schema-travels analyze --provider ollama --model llama3.1:70b ...")
+    console.print("  schema-travels analyze --provider gemini ...")
+    console.print("  schema-travels analyze --provider grok ...")
+    
+    console.print("\n[bold]Environment Variables:[/bold]")
+    console.print("  SCHEMA_TRAVELS_PROVIDER  - Default provider (e.g., 'openai')")
+    console.print("  SCHEMA_TRAVELS_MODEL     - Default model (e.g., 'gpt-4o')")
+    console.print("  OLLAMA_HOST              - Ollama server URL (default: http://localhost:11434)")
+
+
+# =============================================================================
+# Main analyze command
+# =============================================================================
 
 @cli.command()
 @click.option(
@@ -83,7 +146,26 @@ def cli(verbose: bool) -> None:
 @click.option(
     "--use-ai/--no-ai",
     default=True,
-    help="Use Claude AI for recommendations",
+    help="Use AI for recommendations",
+)
+# v2.3.0: New provider options
+@click.option(
+    "--provider",
+    type=click.Choice(["claude", "openai", "gemini", "grok", "ollama"]),
+    default=None,
+    help="LLM provider (default: claude or SCHEMA_TRAVELS_PROVIDER env var)",
+)
+@click.option(
+    "--model",
+    type=str,
+    default=None,
+    help="Model to use (default: provider's default or SCHEMA_TRAVELS_MODEL env var)",
+)
+@click.option(
+    "--ollama-host",
+    type=str,
+    default=None,
+    help="Ollama server URL (default: http://localhost:11434 or OLLAMA_HOST env var)",
 )
 @click.option(
     "--no-cache",
@@ -135,6 +217,9 @@ def analyze(
     target: str,
     output: Path | None,
     use_ai: bool,
+    provider: str | None,
+    model: str | None,
+    ollama_host: str | None,
     no_cache: bool,
     clear_cache: bool,
     cache_mode: str,
@@ -148,19 +233,23 @@ def analyze(
     Parses query logs and schema to identify hot joins, mutation patterns,
     and co-access patterns. Generates recommendations for NoSQL schema design.
     
+    LLM Providers (v2.3.0):
+    
+    \b
+    - claude (default): Anthropic Claude - best reasoning quality
+    - openai: OpenAI GPT-4o - fast and capable
+    - gemini: Google Gemini - long context, low cost
+    - grok: xAI Grok - alternative to GPT-4
+    - ollama: Local models - free, private (Llama, Mistral, etc.)
+    
     Cache modes:
     
     \b
     - relaxed (default): Ignores small log changes. Cache invalidates only when
-      schema changes or access patterns significantly change (new joins, tables
-      flip from read-heavy to write-heavy).
+      schema changes or access patterns significantly change.
     
     \b
-    - strict: Any change in query counts invalidates cache. Use when you want
-      fresh recommendations for every data change.
-    
-    Use --no-cache to bypass cache entirely for one run.
-    Use --clear-cache to invalidate all cached recommendations.
+    - strict: Any change in query counts invalidates cache.
     
     DynamoDB modes (v2.0.0):
     
@@ -169,12 +258,10 @@ def analyze(
       and multi-table design. Uses >70% co-access threshold.
     
     \b
-    - single: Forces single-table design. Best when tables are frequently
-      accessed together (high co-access).
+    - single: Forces single-table design.
     
     \b
-    - multi: Forces multi-table design. Best when tables are accessed
-      independently or have different scaling requirements.
+    - multi: Forces multi-table design.
     """
     analysis_id = str(uuid.uuid4())[:8]
     target_db = TargetDatabase(target)
@@ -192,9 +279,15 @@ def analyze(
         count = cache.invalidate_all()
         console.print(f"[yellow]Cleared {count} cached recommendations[/yellow]")
 
+    # v2.3.0: Show provider info
+    provider_info = ""
+    if use_ai and provider:
+        provider_info = f"\nLLM Provider: {provider}" + (f" ({model})" if model else "")
+
     console.print(Panel.fit(
         f"[bold blue]Schema Travels Analysis[/bold blue]\n"
-        f"Analysis ID: {analysis_id}",
+        f"Analysis ID: {analysis_id}"
+        f"{provider_info}",
         title="Starting Analysis",
     ))
 
@@ -257,165 +350,196 @@ def analyze(
             valid_recs = []  # Initialize here for use later
             dynamodb_review = None  # v2.0.1: AI review for DynamoDB
             
+            # v2.3.0: Create advisor with selected provider
+            def create_advisor():
+                """Create advisor with provider configuration."""
+                provider_kwargs = {}
+                if ollama_host:
+                    provider_kwargs["host"] = ollama_host
+                
+                return Advisor(
+                    provider_name=provider,  # None = use default (claude or env var)
+                    model=model,             # None = use provider's default
+                    **provider_kwargs,
+                )
+            
             # v2.0.1: Different AI flow for DynamoDB vs MongoDB
             if target_db == TargetDatabase.DYNAMODB:
                 # DynamoDB: Local design + optional AI review
                 if use_ai:
-                    settings = get_settings()
-                    if settings.has_api_key():
-                        # First, generate local design to review
-                        task = progress.add_task("Generating DynamoDB design...", total=None)
-                        
-                        # Build table stats for designer
-                        table_stats = []
-                        for ts in result.table_statistics:
-                            table_selected = mutation_analyzer.selected_columns.get(ts.table, {}) if mutation_analyzer else {}
-                            sorted_selected = sorted(table_selected.items(), key=lambda x: x[1], reverse=True)
-                            from schema_travels.analyzer.models import TableStatistics
-                            table_stats.append(TableStatistics(
-                                table=ts.table,
-                                total_accesses=ts.total_accesses,
-                                solo_accesses=ts.solo_accesses,
-                                joined_accesses=ts.joined_accesses,
-                                total_time_ms=ts.total_time_ms,
-                                frequently_filtered_columns=ts.frequently_filtered_columns,
-                                frequently_updated_columns=ts.frequently_updated_columns,
-                                frequently_selected_columns=[col for col, _ in sorted_selected[:10]],
-                                has_select_star=ts.table in (mutation_analyzer.select_star_tables if mutation_analyzer else set()),
-                            ))
-                        
-                        # Create local design
-                        from schema_travels.recommender.dynamodb_designer import DynamoDBDesigner
-                        designer = DynamoDBDesigner(
-                            mode=dynamo_design_mode,
-                            co_access_threshold=0.70,
-                        )
-                        local_design = designer.design(
-                            table_stats=table_stats,
-                            access_patterns=result.access_patterns,
-                            join_patterns=result.join_patterns,
-                            mutation_patterns=result.mutation_patterns,
-                            filtered_columns=dict(mutation_analyzer.filtered_columns) if mutation_analyzer else {},
-                            selected_columns=dict(mutation_analyzer.selected_columns) if mutation_analyzer else {},
-                            select_star_tables=mutation_analyzer.select_star_tables if mutation_analyzer else set(),
-                        )
+                    # First, generate local design to review
+                    task = progress.add_task("Generating DynamoDB design...", total=None)
+                    
+                    # Build table stats for designer
+                    table_stats = []
+                    for ts in result.table_statistics:
+                        table_selected = mutation_analyzer.selected_columns.get(ts.table, {}) if mutation_analyzer else {}
+                        sorted_selected = sorted(table_selected.items(), key=lambda x: x[1], reverse=True)
+                        from schema_travels.analyzer.models import TableStatistics
+                        table_stats.append(TableStatistics(
+                            table=ts.table,
+                            total_accesses=ts.total_accesses,
+                            solo_accesses=ts.solo_accesses,
+                            joined_accesses=ts.joined_accesses,
+                            total_time_ms=ts.total_time_ms,
+                            frequently_filtered_columns=ts.frequently_filtered_columns,
+                            frequently_updated_columns=ts.frequently_updated_columns,
+                            frequently_selected_columns=[col for col, _ in sorted_selected[:10]],
+                            has_select_star=ts.table in (mutation_analyzer.select_star_tables if mutation_analyzer else set()),
+                        ))
+                    
+                    # Create local design
+                    from schema_travels.recommender.dynamodb_designer import DynamoDBDesigner
+                    designer = DynamoDBDesigner(
+                        mode=dynamo_design_mode,
+                        co_access_threshold=0.70,
+                    )
+                    local_design = designer.design(
+                        table_stats=table_stats,
+                        access_patterns=result.access_patterns,
+                        join_patterns=result.join_patterns,
+                        mutation_patterns=result.mutation_patterns,
+                        filtered_columns=dict(mutation_analyzer.filtered_columns) if mutation_analyzer else {},
+                        selected_columns=dict(mutation_analyzer.selected_columns) if mutation_analyzer else {},
+                        select_star_tables=mutation_analyzer.select_star_tables if mutation_analyzer else set(),
+                    )
+                    progress.update(task, completed=True)
+                    console.print(f"  Local design: [bold]{local_design.design_mode.value}[/bold] (confidence: {local_design.confidence:.0%})")
+                    
+                    # Compute cache key for review
+                    mode = CacheMode(cache_mode)
+                    input_hash = compute_input_hash(schema, result, target_db, mode) + "_review"
+                    
+                    # DynamoDB reviews use direct file caching (not cache.put/get which expect SchemaRecommendation)
+                    review_cache_file = cache.cache_dir / f"{input_hash}.json"
+                    
+                    # Check cache for review
+                    cached_review = None
+                    if not no_cache:
+                        task = progress.add_task("Checking review cache...", total=None)
+                        if review_cache_file.exists():
+                            try:
+                                import json as json_module
+                                with open(review_cache_file) as f:
+                                    cached_data = json_module.load(f)
+                                # Extract the review data from cache structure
+                                review_data = cached_data.get("review", cached_data)
+                                dynamodb_review = DynamoDBReview(**review_data)
+                                cached_review = True
+                                cache_used = True
+                                console.print(f"  [green]✓ Using cached AI review[/green] [dim](hash: {input_hash})[/dim]")
+                            except Exception as e:
+                                logger.warning(f"Failed to load cached review: {e}")
+                                cached_review = None
                         progress.update(task, completed=True)
-                        console.print(f"  Local design: [bold]{local_design.design_mode.value}[/bold] (confidence: {local_design.confidence:.0%})")
-                        
-                        # Compute cache key for review
-                        mode = CacheMode(cache_mode)
-                        input_hash = compute_input_hash(schema, result, target_db, mode) + "_review"
-                        
-                        # Check cache for review
-                        cached_review = None
-                        if not no_cache:
-                            task = progress.add_task("Checking review cache...", total=None)
-                            cached_review = cache.get(input_hash)
+                    
+                    # If not cached, get AI review
+                    if not cached_review:
+                        try:
+                            task = progress.add_task("Getting AI review of design...", total=None)
+                            advisor = create_advisor()
+                            console.print(f"  [dim]Using {advisor.provider_name} ({advisor.model})[/dim]")
+                            
+                            dynamodb_review = advisor.review_dynamodb_design(
+                                local_design, result, schema
+                            )
                             progress.update(task, completed=True)
                             
-                            if cached_review:
-                                # Reconstruct review from cached dict
-                                from schema_travels.recommender.dynamodb_models import DynamoDBReview
-                                try:
-                                    dynamodb_review = DynamoDBReview(**cached_review)
-                                    cache_used = True
-                                    console.print(f"  [green]✓ Using cached AI review[/green] [dim](hash: {input_hash})[/dim]")
-                                except Exception as e:
-                                    logger.warning(f"Failed to load cached review: {e}")
-                                    cached_review = None
-                        
-                        # If not cached, get AI review
-                        if not cached_review:
-                            try:
-                                task = progress.add_task("Getting AI review of design...", total=None)
-                                advisor = ClaudeAdvisor()
-                                dynamodb_review = advisor.review_dynamodb_design(
-                                    local_design, result, schema
-                                )
-                                progress.update(task, completed=True)
-                                
-                                # Cache the review
-                                cache.put(input_hash, dynamodb_review.to_dict(), metadata={
+                            # Cache the review directly as JSON (not via cache.put which expects recommendations)
+                            import json as json_module
+                            cache_data = {
+                                "input_hash": input_hash,
+                                "version": RECOMMENDATION_VERSION,
+                                "timestamp": datetime.now().isoformat(),
+                                "review": dynamodb_review.to_dict(),
+                                "metadata": {
                                     "analysis_id": analysis_id,
                                     "design_mode": local_design.design_mode.value,
                                     "cache_mode": cache_mode,
-                                })
-                                console.print(f"  [dim]Cached AI review (hash: {input_hash})[/dim]")
-                                
-                                # Show review summary
-                                if dynamodb_review.approved:
-                                    if dynamodb_review.has_changes:
-                                        console.print(f"  [green]✓ AI approved with {dynamodb_review.change_count} suggestions[/green]")
-                                    else:
-                                        console.print(f"  [green]✓ AI approved design (no changes)[/green]")
+                                    "provider": advisor.provider_name,
+                                    "model": advisor.model,
+                                },
+                            }
+                            with open(review_cache_file, "w") as f:
+                                json_module.dump(cache_data, f, indent=2)
+                            console.print(f"  [dim]Cached AI review (hash: {input_hash})[/dim]")
+                            
+                            # Show review summary
+                            if dynamodb_review.approved:
+                                if dynamodb_review.has_changes:
+                                    console.print(f"  [green]✓ AI approved with {dynamodb_review.change_count} suggestions[/green]")
                                 else:
-                                    console.print(f"  [yellow]⚠ AI flagged issues ({dynamodb_review.change_count} changes suggested)[/yellow]")
-                                
-                            except APIKeyNotConfiguredError as e:
-                                console.print(e.message)
-                                sys.exit(1)
-                            except Exception as e:
-                                console.print(f"  [yellow]⚠ AI review failed: {e}[/yellow]")
-                                console.print(f"  [dim]Continuing with local design only[/dim]")
-                    else:
-                        console.print("[yellow]⚠ API key not configured, using algorithmic design only[/yellow]")
-                        console.print("[dim]  Set ANTHROPIC_API_KEY for AI review[/dim]")
+                                    console.print(f"  [green]✓ AI approved design (no changes)[/green]")
+                            else:
+                                console.print(f"  [yellow]⚠ AI flagged issues ({dynamodb_review.change_count} changes suggested)[/yellow]")
+                            
+                        except APIKeyMissingError as e:
+                            console.print(f"[red]Error:[/red] {e}")
+                            console.print(f"[yellow]Tip:[/yellow] Set the required API key or use --no-ai flag")
+                            sys.exit(1)
+                        except LLMProviderError as e:
+                            console.print(f"  [yellow]⚠ AI review failed: {e}[/yellow]")
+                            if "overloaded" in str(e).lower():
+                                console.print(f"  [dim]Tip: Try again later or use --no-ai flag[/dim]")
+                            console.print(f"  [dim]Continuing with local design only[/dim]")
                 else:
                     console.print("  [dim]DynamoDB mode: Using algorithmic design (--no-ai)[/dim]")
                     
             elif use_ai:
-                settings = get_settings()
+                # MongoDB: AI recommendations
+                # Compute input hash for cache lookup
+                mode = CacheMode(cache_mode)
+                input_hash = compute_input_hash(schema, result, target_db, mode)
                 
-                # Check if API key is configured
-                if not settings.has_api_key():
-                    console.print("[yellow]⚠ API key not configured, using rule-based recommendations[/yellow]")
-                    console.print("[dim]  Set ANTHROPIC_API_KEY or use --no-ai flag[/dim]")
-                    recommendations = analyzer.get_embedding_recommendations(result)
-                else:
-                    # Compute input hash for cache lookup
-                    mode = CacheMode(cache_mode)
-                    input_hash = compute_input_hash(schema, result, target_db, mode)
+                # Check cache first (unless --no-cache)
+                if not no_cache:
+                    task = progress.add_task("Checking recommendation cache...", total=None)
+                    cached_recs = cache.get(input_hash)
+                    progress.update(task, completed=True)
                     
-                    # Check cache first (unless --no-cache)
-                    if not no_cache:
-                        task = progress.add_task("Checking recommendation cache...", total=None)
-                        cached_recs = cache.get(input_hash)
+                    if cached_recs:
+                        recommendations = cached_recs
+                        cache_used = True
+                        console.print(f"  [green]✓ Using cached recommendations[/green] [dim](hash: {input_hash}, mode: {cache_mode})[/dim]")
+                
+                # If not cached, call AI
+                if not recommendations:
+                    try:
+                        task = progress.add_task("Getting AI recommendations...", total=None)
+                        advisor = create_advisor()
+                        console.print(f"  [dim]Using {advisor.provider_name} ({advisor.model})[/dim]")
+                        
+                        recommendations = advisor.get_recommendations(
+                            schema, result, target_db
+                        )
                         progress.update(task, completed=True)
                         
-                        if cached_recs:
-                            recommendations = cached_recs
-                            cache_used = True
-                            console.print(f"  [green]✓ Using cached recommendations[/green] [dim](hash: {input_hash}, mode: {cache_mode})[/dim]")
-                    
-                    # If not cached, call Claude API
-                    if not recommendations:
-                        try:
-                            task = progress.add_task("Getting AI recommendations...", total=None)
-                            advisor = ClaudeAdvisor()
-                            recommendations = advisor.get_recommendations(
-                                schema, result, target_db
-                            )
-                            progress.update(task, completed=True)
-                            
-                            # Cache the recommendations
-                            cache.put(input_hash, recommendations, metadata={
-                                "analysis_id": analysis_id,
-                                "logs_dir": str(logs_dir),
-                                "schema_file": str(schema_file),
-                                "cache_mode": cache_mode,
-                            })
-                            console.print(f"  [dim]Cached recommendations (hash: {input_hash}, mode: {cache_mode})[/dim]")
-                            
-                        except APIKeyNotConfiguredError as e:
-                            console.print(e.message)
-                            sys.exit(1)
+                        # Cache the recommendations
+                        cache.put(input_hash, recommendations, metadata={
+                            "analysis_id": analysis_id,
+                            "logs_dir": str(logs_dir),
+                            "schema_file": str(schema_file),
+                            "cache_mode": cache_mode,
+                            "provider": advisor.provider_name,
+                            "model": advisor.model,
+                        })
+                        console.print(f"  [dim]Cached recommendations (hash: {input_hash}, mode: {cache_mode})[/dim]")
+                        
+                    except APIKeyMissingError as e:
+                        console.print(f"[red]Error:[/red] {e}")
+                        console.print(f"[yellow]Tip:[/yellow] Set the required API key or use --no-ai flag")
+                        console.print(f"[yellow]Tip:[/yellow] Run 'schema-travels providers' to see available providers")
+                        sys.exit(1)
+                    except LLMProviderError as e:
+                        console.print(f"[red]LLM Error:[/red] {e}")
+                        if "overloaded" in str(e).lower():
+                            console.print("[yellow]Tip:[/yellow] Try again later or use --no-ai flag")
+                        sys.exit(1)
             else:
                 recommendations = analyzer.get_embedding_recommendations(result)
 
             # Save recommendations
             if recommendations:
-                from schema_travels.recommender.models import SchemaRecommendation, RelationshipDecision
-                
                 def to_schema_rec(r):
                     """Convert various recommendation formats to SchemaRecommendation."""
                     if isinstance(r, SchemaRecommendation):
@@ -473,7 +597,6 @@ def analyze(
             task = progress.add_task("Generating target schema...", total=None)
             
             # v2.0.0: Pass DynamoDB-specific options to SchemaGenerator
-            # v2.0.1: Also pass AI review for DynamoDB
             if target_db == TargetDatabase.DYNAMODB and mutation_analyzer:
                 generator = SchemaGenerator(
                     schema, 
@@ -483,16 +606,7 @@ def analyze(
                     filtered_columns=dict(mutation_analyzer.filtered_columns),
                     selected_columns=dict(mutation_analyzer.selected_columns),
                     select_star_tables=mutation_analyzer.select_star_tables,
-                    dynamodb_review=dynamodb_review,  # v2.0.1: AI review
-                )
-            elif target_db == TargetDatabase.DYNAMODB:
-                # DynamoDB without mutation analyzer (shouldn't happen, but handle it)
-                generator = SchemaGenerator(
-                    schema, 
-                    result, 
-                    valid_recs,
-                    dynamodb_mode=dynamo_design_mode,
-                    dynamodb_review=dynamodb_review,
+                    dynamodb_review=dynamodb_review,  # v2.0.1: Pass review
                 )
             else:
                 generator = SchemaGenerator(schema, result, valid_recs)
@@ -502,21 +616,11 @@ def analyze(
             progress.update(task, completed=True)
             
             # v2.0.0: Show DynamoDB design mode in output
-            # v2.0.1: Also show AI review status
             if target_db == TargetDatabase.DYNAMODB:
                 design_mode = target_schema.metadata.get("design_mode", "unknown")
                 confidence = target_schema.metadata.get("confidence", 0)
-                dynamodb_design = target_schema.metadata.get("dynamodb_design", {})
-                ai_reviewed = dynamodb_design.get("ai_reviewed", False)
-                ai_applied = dynamodb_design.get("ai_review_applied", False)
-                
-                review_status = ""
-                if ai_reviewed:
-                    if ai_applied:
-                        review_status = " [green](AI reviewed + applied)[/green]"
-                    else:
-                        review_status = " [dim](AI reviewed)[/dim]"
-                        
+                ai_reviewed = target_schema.metadata.get("dynamodb_design", {}).get("ai_reviewed", False)
+                review_status = " [green](AI reviewed)[/green]" if ai_reviewed else ""
                 console.print(f"  DynamoDB design: [bold]{design_mode}[/bold] (confidence: {confidence:.0%}){review_status}")
 
         # Display results
@@ -534,62 +638,56 @@ def analyze(
             if target_db == TargetDatabase.DYNAMODB and dynamodb_output:
                 dynamo_design = target_schema.metadata.get("dynamodb_design")
                 if dynamo_design:
-                    # Re-create design object for formatting
-                    from schema_travels.recommender.dynamodb_models import DynamoDBDesign
-                    
-                    # The design is already a dict from to_dict(), format it directly
                     if dynamodb_output == "terraform":
-                        # For terraform, we need to reconstruct the design object
-                        # or use the dict directly with a custom formatter
                         output_content = _format_dynamodb_terraform(dynamo_design)
-                        output_file = output.with_suffix(".tf") if not str(output).endswith(".tf") else output
-                        with open(output_file, "w") as f:
-                            f.write(output_content)
-                        console.print(f"\n[green]Terraform saved to {output_file}[/green]")
+                        output_path = output.with_suffix(".tf") if not str(output).endswith(".tf") else output
+                        output_path.write_text(output_content)
+                        console.print(f"\n[green]✓ Terraform saved to {output_path}[/green]")
                     elif dynamodb_output == "nosql_workbench":
                         output_content = _format_dynamodb_workbench(dynamo_design, analysis_id)
-                        output_file = output.with_suffix(".workbench.json") if not str(output).endswith(".workbench.json") else output
-                        with open(output_file, "w") as f:
-                            f.write(output_content)
-                        console.print(f"\n[green]NoSQL Workbench JSON saved to {output_file}[/green]")
+                        output_path = output.with_suffix(".workbench.json") if not str(output).endswith(".workbench.json") else output
+                        output_path.write_text(output_content)
+                        console.print(f"\n[green]✓ NoSQL Workbench JSON saved to {output_path}[/green]")
                     else:
                         # Default JSON
-                        with open(output, "w") as f:
-                            json.dump(dynamo_design, f, indent=2)
-                        console.print(f"\n[green]DynamoDB design saved to {output}[/green]")
+                        output.write_text(json.dumps(dynamo_design, indent=2))
+                        console.print(f"\n[green]✓ DynamoDB design saved to {output}[/green]")
                 else:
                     console.print("[yellow]Warning: DynamoDB design not found in metadata[/yellow]")
             else:
-                # Standard JSON output
                 output_data = {
                     "analysis_id": analysis_id,
-                    "cache_used": cache_used,
-                    "cache_mode": cache_mode,
-                    "analysis": result.to_dict(),
                     "target_schema": target_schema.to_dict(),
                 }
-                # v2.0.1: Only include recommendations for MongoDB
-                # For DynamoDB, the design is in target_schema.metadata.dynamodb_design
+                # Only include recommendations for MongoDB
                 if target_db == TargetDatabase.MONGODB:
-                    output_data["recommendations"] = [
-                        r.to_dict() if hasattr(r, 'to_dict') else r 
-                        for r in recommendations
-                    ]
-                with open(output, "w") as f:
-                    json.dump(output_data, f, indent=2)
-                console.print(f"\n[green]Results saved to {output}[/green]")
+                    output_data["recommendations"] = [r.to_dict() if hasattr(r, 'to_dict') else r for r in valid_recs]
+                output.write_text(json.dumps(output_data, indent=2))
+                console.print(f"\n[green]✓ Output saved to {output}[/green]")
 
-        console.print(f"\n[bold green]✓ Analysis complete![/bold green]")
-        console.print(f"  Analysis ID: {analysis_id}")
-        if cache_used:
-            console.print(f"  [dim]Used cached recommendations. Run with --no-cache for fresh analysis.[/dim]")
-        console.print(f"  View report: schema-travels report --analysis-id {analysis_id}")
+        # Update analysis status
+        repo.update_analysis_status(analysis_id, "completed")
 
     except Exception as e:
-        repo.update_analysis_status(analysis_id, "failed")
-        console.print(f"[bold red]Error:[/bold red] {e}")
         logger.exception("Analysis failed")
+        repo.update_analysis_status(analysis_id, "failed")
+        console.print(f"\n[red]Error: {e}[/red]")
         sys.exit(1)
+
+
+def _confidence_color(confidence: float) -> str:
+    """Get color based on confidence level.
+    
+    - Green: >= 85% (high confidence)
+    - Yellow: 70-84% (medium confidence)
+    - Red: < 70% (low confidence)
+    """
+    if confidence >= 0.85:
+        return "green"
+    elif confidence >= 0.70:
+        return "yellow"
+    else:
+        return "red"
 
 
 # =============================================================================
@@ -600,15 +698,15 @@ def _format_dynamodb_terraform(design_dict: dict) -> str:
     """Format DynamoDB design as Terraform HCL."""
     lines = []
     lines.append("# =============================================================================")
-    lines.append("# DynamoDB Tables - Generated by schema-travels v2.0.0")
+    lines.append("# DynamoDB Tables - Generated by schema-travels v2.3.0")
     lines.append(f"# Design Mode: {design_dict.get('design_mode', 'unknown')}")
     lines.append("# =============================================================================")
     lines.append("")
     
     if design_dict.get("design_mode") == "single_table":
-        table_name = design_dict.get("table_name", "main_table")
-        pk = design_dict.get("partition_key", "PK")
-        sk = design_dict.get("sort_key", "SK")
+        table_name = design_dict.get("table_name") or "main_table"
+        pk = design_dict.get("partition_key") or "PK"
+        sk = design_dict.get("sort_key") or "SK"
         
         lines.append(f'resource "aws_dynamodb_table" "{_to_resource_name(table_name)}" {{')
         lines.append(f'  name         = "{table_name}"')
@@ -661,8 +759,8 @@ def _format_dynamodb_terraform(design_dict: dict) -> str:
     else:
         # Multi-table
         for table in design_dict.get("tables", []):
-            table_name = table.get("table_name", "table")
-            pk = table.get("partition_key", "id")
+            table_name = table.get("table_name") or "table"
+            pk = table.get("partition_key") or "id"
             sk = table.get("sort_key")
             
             lines.append(f'resource "aws_dynamodb_table" "{_to_resource_name(table_name)}" {{')
@@ -697,15 +795,15 @@ def _format_dynamodb_workbench(design_dict: dict, model_name: str) -> str:
             "DateCreated": None,
             "DateLastModified": None,
             "Description": f"Generated from SQL analysis. Mode: {design_dict.get('design_mode', 'unknown')}",
-            "Version": "2.0.0",
+            "Version": "2.3.0",
         },
         "DataModel": [],
     }
     
     if design_dict.get("design_mode") == "single_table":
-        table_name = design_dict.get("table_name", "MainTable")
-        pk = design_dict.get("partition_key", "PK")
-        sk = design_dict.get("sort_key", "SK")
+        table_name = design_dict.get("table_name") or "MainTable"
+        pk = design_dict.get("partition_key") or "PK"
+        sk = design_dict.get("sort_key") or "SK"
         
         table_def = {
             "TableName": table_name,
@@ -760,10 +858,10 @@ def _format_dynamodb_workbench(design_dict: dict, model_name: str) -> str:
         # Multi-table
         for table in design_dict.get("tables", []):
             table_def = {
-                "TableName": table.get("table_name", "Table"),
+                "TableName": table.get("table_name") or "Table",
                 "KeyAttributes": {
                     "PartitionKey": {
-                        "AttributeName": table.get("partition_key", "id"),
+                        "AttributeName": table.get("partition_key") or "id",
                         "AttributeType": "S",
                     },
                 },
@@ -782,379 +880,135 @@ def _format_dynamodb_workbench(design_dict: dict, model_name: str) -> str:
 
 def _to_resource_name(table_name: str) -> str:
     """Convert table name to valid Terraform resource name."""
+    if not table_name:
+        table_name = "unnamed_table"
     name = table_name.replace("-", "_").replace(".", "_")
     if name[0].isdigit():
         name = "table_" + name
     return name
 
 
-@cli.command()
-@click.option(
-    "--analysis-id",
-    required=True,
-    help="Analysis ID to generate report for",
-)
-@click.option(
-    "--format",
-    type=click.Choice(["text", "json", "markdown"]),
-    default="text",
-    help="Output format",
-)
-def report(analysis_id: str, format: str) -> None:
-    """View analysis report.
-
-    Display detailed report for a previous analysis including
-    hot joins, mutation patterns, and recommendations.
-    """
-    repo = AnalysisRepository()
-
-    analysis = repo.get_analysis(analysis_id)
-    if not analysis:
-        console.print(f"[red]Analysis not found: {analysis_id}[/red]")
-        sys.exit(1)
-
-    result = repo.get_analysis_result(analysis_id)
-    recommendations = repo.get_recommendations(analysis_id)
-    target_schema = repo.get_target_schema(analysis_id)
-
-    if format == "json":
-        output = {
-            "analysis": analysis,
-            "result": result,
-            "recommendations": recommendations,
-            "target_schema": target_schema,
-        }
-        console.print_json(data=output)
-    elif format == "markdown":
-        _print_markdown_report(analysis, result, recommendations, target_schema)
-    else:
-        _print_text_report(analysis, result, recommendations, target_schema)
-
-
-@cli.command()
-@click.option(
-    "--analysis-id",
-    required=True,
-    help="Analysis ID to simulate",
-)
-@click.option(
-    "--row-counts",
-    type=click.Path(exists=True, path_type=Path),
-    help="JSON file with table row counts",
-)
-def simulate(analysis_id: str, row_counts: Path | None) -> None:
-    """Run migration simulation.
-
-    Estimate storage, latency, and cost impact of the migration
-    based on analysis results.
-    """
-    repo = AnalysisRepository()
-
-    analysis = repo.get_analysis(analysis_id)
-    if not analysis:
-        console.print(f"[red]Analysis not found: {analysis_id}[/red]")
-        sys.exit(1)
-
-    # Load data
-    result_data = repo.get_analysis_result(analysis_id)
-    target_schema_data = repo.get_target_schema(analysis_id)
-
-    if not result_data or not target_schema_data:
-        console.print("[red]Analysis result or target schema not found[/red]")
-        sys.exit(1)
-
-    # Load row counts if provided
-    table_row_counts = None
-    if row_counts:
-        with open(row_counts) as f:
-            table_row_counts = json.load(f)
-
-    # Reconstruct objects (simplified - would need proper deserialization)
-    console.print("[yellow]Simulation functionality requires schema reconstruction...[/yellow]")
-    console.print("For full simulation, please re-run analysis with --simulate flag.")
-
-
-@cli.command()
-@click.option(
-    "--limit",
-    default=20,
-    help="Maximum number of analyses to show",
-)
-def history(limit: int) -> None:
-    """List past analyses.
-
-    Show a list of all previous analyses with their status and key metrics.
-    """
-    repo = AnalysisRepository()
-    analyses = repo.list_analyses(limit=limit)
-
-    if not analyses:
-        console.print("[yellow]No analyses found.[/yellow]")
-        console.print("Run 'schema-travels analyze' to create one.")
-        return
-
-    table = Table(title="Analysis History")
-    table.add_column("ID", style="cyan")
-    table.add_column("Created", style="green")
-    table.add_column("Source", style="blue")
-    table.add_column("Target", style="blue")
-    table.add_column("Queries", justify="right")
-    table.add_column("Tables", justify="right")
-    table.add_column("Status", style="yellow")
-
-    for a in analyses:
-        table.add_row(
-            a["id"],
-            str(a["created_at"])[:19],
-            a["source_db_type"],
-            a["target_db_type"],
-            str(a["total_queries"]),
-            str(a["tables_analyzed"]),
-            a["status"],
-        )
-
-    console.print(table)
-
-
-@cli.command()
-@click.option(
-    "--analysis-id",
-    required=True,
-    help="Analysis ID to delete",
-)
-@click.confirmation_option(prompt="Are you sure you want to delete this analysis?")
-def delete(analysis_id: str) -> None:
-    """Delete an analysis.
-
-    Remove an analysis and all associated data from the database.
-    """
-    repo = AnalysisRepository()
-
-    if repo.delete_analysis(analysis_id):
-        console.print(f"[green]Deleted analysis: {analysis_id}[/green]")
-    else:
-        console.print(f"[red]Analysis not found: {analysis_id}[/red]")
-        sys.exit(1)
-
-
-@cli.command()
-def config() -> None:
-    """Show current configuration.
-
-    Display the current configuration settings including
-    API key status and default values.
-    """
-    settings = get_settings()
-
-    console.print(Panel.fit(
-        "[bold]Schema Travels Configuration[/bold]",
-        title="Config",
-    ))
-
-    table = Table(show_header=True)
-    table.add_column("Setting", style="cyan")
-    table.add_column("Value", style="green")
-
-    table.add_row("API Key", "✓ Configured" if settings.has_api_key() else "✗ Not set")
-    table.add_row("Model", settings.anthropic_model)
-    table.add_row("Database", str(settings.db_path))
-    table.add_row("Cache Dir", str(settings.db_path.parent / "cache"))
-    table.add_row("Default Target", settings.default_target)
-    table.add_row("Default DB Type", settings.default_db_type)
-    table.add_row("Log Level", settings.log_level)
-
-    console.print(table)
-    
-    # Show cache stats
-    cache = get_cache()
-    entries = cache.list_entries()
-    console.print(f"\n[dim]Cached recommendations: {len(entries)}[/dim]")
-
-
-@cli.command("clear-cache")
-@click.confirmation_option(prompt="Are you sure you want to clear all cached recommendations?")
-def clear_cache_cmd() -> None:
-    """Clear all cached recommendations.
-
-    Remove all cached AI recommendations. Next analysis will
-    fetch fresh recommendations from Claude.
-    """
-    cache = get_cache()
-    count = cache.invalidate_all()
-    console.print(f"[green]Cleared {count} cached recommendations[/green]")
-
-
-def _confidence_color(confidence: float) -> str:
-    """Return Rich color markup based on confidence level."""
-    if confidence >= 0.85:
-        return "green"
-    elif confidence >= 0.70:
-        return "yellow"
-    else:
-        return "red"
-
-
 def _display_analysis_summary(
-    result, 
-    recommendations, 
-    target_schema, 
+    result,
+    recommendations,
+    target_schema,
     cache_used: bool = False,
     min_confidence: float | None = None,
     show_rewrites: bool = False,
     target_db: TargetDatabase = TargetDatabase.MONGODB,
 ) -> None:
-    """Display analysis summary in console."""
-    console.print("\n")
-
-    # Hot joins table
-    if result.join_patterns:
-        table = Table(title="🔥 Hot Joins (Top 10)")
-        table.add_column("Tables", style="cyan")
-        table.add_column("Frequency", justify="right")
-        table.add_column("Avg Time", justify="right")
-        table.add_column("Cost Score", justify="right", style="yellow")
-
-        for jp in result.join_patterns[:10]:
-            table.add_row(
-                f"{jp.left_table} ⟷ {jp.right_table}",
-                f"{jp.frequency:,}",
-                f"{jp.avg_time_ms:.1f}ms",
-                f"{jp.cost_score:,.0f}",
-            )
-
-        console.print(table)
-
-    # Mutation patterns
-    if result.mutation_patterns:
-        console.print("\n")
-        table = Table(title="📊 Mutation Patterns")
-        table.add_column("Table", style="cyan")
-        table.add_column("Reads", justify="right")
-        table.add_column("Writes", justify="right")
-        table.add_column("Write %", justify="right")
-        table.add_column("Type", style="yellow")
-
-        for mp in sorted(result.mutation_patterns, key=lambda m: m.total_operations, reverse=True)[:10]:
-            type_label = "📖 Read-heavy" if mp.is_read_heavy else ("✏️ Write-heavy" if mp.is_write_heavy else "⚖️ Mixed")
-            table.add_row(
-                mp.table,
-                f"{mp.select_count:,}",
-                f"{mp.total_writes:,}",
-                f"{mp.write_ratio:.0%}",
-                type_label,
-            )
-
-        console.print(table)
-
-    # v2.0.0: DynamoDB-specific output
+    """Display analysis summary."""
+    
+    # For DynamoDB, show design summary instead of recommendations
     if target_db == TargetDatabase.DYNAMODB:
         _display_dynamodb_summary(target_schema)
-        return  # v2.0.1: Don't show MongoDB-style recommendations for DynamoDB
-
-    # Recommendations (MongoDB only)
-    if recommendations:
-        # Convert to consistent format and filter by confidence
-        from schema_travels.recommender.models import SchemaRecommendation, RelationshipDecision
+        return
+    
+    # MongoDB: Show recommendations
+    if not recommendations:
+        console.print("\n[yellow]No recommendations generated[/yellow]")
+        return
         
-        filtered_recs = []
-        for r in recommendations:
-            if isinstance(r, dict):
-                parent = r.get("parent_table", "")
-                child = r.get("child_table", "")
-                decision = r.get("decision", "")
-                confidence = r.get("confidence", 0)
-                reasoning = r.get("reasoning", [])
-            else:
-                parent = r.parent_table
-                child = r.child_table
-                decision = r.decision.value if hasattr(r.decision, 'value') else r.decision
-                confidence = r.confidence
-                reasoning = r.reasoning
+    # Convert to standard format for display
+    filtered_recs = []
+    for r in recommendations:
+        if isinstance(r, dict):
+            parent = r.get("parent_table", "")
+            child = r.get("child_table", "")
+            decision = r.get("decision", "reference")
+            confidence = r.get("confidence", 0.5)
+            reasoning = r.get("reasoning", [])
+        else:
+            parent = r.parent_table
+            child = r.child_table
+            decision = r.decision.value if hasattr(r.decision, 'value') else r.decision
+            confidence = r.confidence
+            reasoning = r.reasoning
+        
+        # Apply min_confidence filter
+        if min_confidence is not None and confidence < min_confidence:
+            continue
             
-            # Apply min_confidence filter
-            if min_confidence is not None and confidence < min_confidence:
-                continue
-                
-            filtered_recs.append({
-                "parent": parent,
-                "child": child,
-                "decision": decision,
-                "confidence": confidence,
-                "reasoning": reasoning,
-            })
-        
+        filtered_recs.append({
+            "parent": parent,
+            "child": child,
+            "decision": decision,
+            "confidence": confidence,
+            "reasoning": reasoning,
+        })
+    
+    console.print("\n")
+    title = "💡 Schema Recommendations"
+    if cache_used:
+        title += " [dim](cached)[/dim]"
+    if min_confidence is not None:
+        title += f" [dim](≥{min_confidence:.0%} confidence)[/dim]"
+    table = Table(title=title)
+    table.add_column("Relationship", style="cyan")
+    table.add_column("Decision", style="green")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Reasoning")
+
+    for r in filtered_recs[:10]:
+        color = _confidence_color(r["confidence"])
+        decision_str = r["decision"].upper() if isinstance(r["decision"], str) else str(r["decision"]).upper()
+        table.add_row(
+            f"{r['parent']} → {r['child']}",
+            decision_str,
+            f"[{color}]{r['confidence']:.0%}[/{color}]",
+            r["reasoning"][0] if r["reasoning"] else "",
+        )
+
+    console.print(table)
+    
+    if min_confidence is not None and len(filtered_recs) < len(recommendations):
+        console.print(f"  [dim]({len(recommendations) - len(filtered_recs)} recommendations below {min_confidence:.0%} confidence hidden)[/dim]")
+    
+    # Show query rewrites if requested (MongoDB only for now)
+    if show_rewrites and filtered_recs and target_db == TargetDatabase.MONGODB:
         console.print("\n")
-        title = "💡 Schema Recommendations"
-        if cache_used:
-            title += " [dim](cached)[/dim]"
-        if min_confidence is not None:
-            title += f" [dim](≥{min_confidence:.0%} confidence)[/dim]"
-        table = Table(title=title)
-        table.add_column("Relationship", style="cyan")
-        table.add_column("Decision", style="green")
-        table.add_column("Confidence", justify="right")
-        table.add_column("Reasoning")
-
-        for r in filtered_recs[:10]:
-            color = _confidence_color(r["confidence"])
-            decision_str = r["decision"].upper() if isinstance(r["decision"], str) else str(r["decision"]).upper()
-            table.add_row(
-                f"{r['parent']} → {r['child']}",
-                decision_str,
-                f"[{color}]{r['confidence']:.0%}[/{color}]",
-                r["reasoning"][0] if r["reasoning"] else "",
-            )
-
-        console.print(table)
+        console.print(Panel.fit(
+            "[bold]📝 SQL → MongoDB Query Rewrites[/bold]",
+            title="Query Examples",
+        ))
         
-        if min_confidence is not None and len(filtered_recs) < len(recommendations):
-            console.print(f"  [dim]({len(recommendations) - len(filtered_recs)} recommendations below {min_confidence:.0%} confidence hidden)[/dim]")
-        
-        # Show query rewrites if requested (MongoDB only for now)
-        if show_rewrites and filtered_recs and target_db == TargetDatabase.MONGODB:
-            console.print("\n")
-            console.print(Panel.fit(
-                "[bold]📝 SQL → MongoDB Query Rewrites[/bold]",
-                title="Query Examples",
+        # Convert filtered_recs back to SchemaRecommendation for generate_rewrites
+        schema_recs_for_rewrite = []
+        for r in filtered_recs:
+            decision = r["decision"]
+            if isinstance(decision, str):
+                try:
+                    decision = RelationshipDecision(decision.lower())
+                except ValueError:
+                    decision = RelationshipDecision.REFERENCE
+            schema_recs_for_rewrite.append(SchemaRecommendation(
+                parent_table=r["parent"],
+                child_table=r["child"],
+                decision=decision,
+                confidence=r["confidence"],
+                reasoning=r["reasoning"],
+                warnings=[],
             ))
-            
-            # Convert filtered_recs back to SchemaRecommendation for generate_rewrites
-            schema_recs_for_rewrite = []
-            for r in filtered_recs:
-                decision = r["decision"]
-                if isinstance(decision, str):
-                    try:
-                        decision = RelationshipDecision(decision.lower())
-                    except ValueError:
-                        decision = RelationshipDecision.REFERENCE
-                schema_recs_for_rewrite.append(SchemaRecommendation(
-                    parent_table=r["parent"],
-                    child_table=r["child"],
-                    decision=decision,
-                    confidence=r["confidence"],
-                    reasoning=r["reasoning"],
-                    warnings=[],
-                ))
-            
-            rewrite_result = generate_rewrites(schema_recs_for_rewrite)
-            
-            for example in rewrite_result.examples:
-                color = "green" if example.decision == "EMBED" else (
-                    "blue" if example.decision == "REFERENCE" else (
-                    "yellow" if example.decision == "SEPARATE" else "magenta"
-                ))
-                console.print(f"\n[bold {color}]━━━ {example.relationship} ({example.decision}) ━━━[/bold {color}]")
-                console.print(f"[dim]Scenario:[/dim] {example.scenario}\n")
-                console.print("[bold]SQL:[/bold]")
-                console.print(Panel(example.sql, border_style="dim"))
-                console.print("[bold]MongoDB:[/bold]")
-                console.print(Panel(example.mongodb, border_style="dim"))
-                console.print(f"[dim]Why:[/dim] {example.explanation}")
-            
-            if rewrite_result.errors:
-                console.print("\n[yellow]Rewrite warnings:[/yellow]")
-                for err in rewrite_result.errors:
-                    console.print(f"  [dim]• {err}[/dim]")
+        
+        rewrite_result = generate_rewrites(schema_recs_for_rewrite)
+        
+        for example in rewrite_result.examples:
+            color = "green" if example.decision == "EMBED" else (
+                "blue" if example.decision == "REFERENCE" else (
+                "yellow" if example.decision == "SEPARATE" else "magenta"
+            ))
+            console.print(f"\n[bold {color}]━━━ {example.relationship} ({example.decision}) ━━━[/bold {color}]")
+            console.print(f"[dim]Scenario:[/dim] {example.scenario}\n")
+            console.print("[bold]SQL:[/bold]")
+            console.print(Panel(example.sql, border_style="dim"))
+            console.print("[bold]MongoDB:[/bold]")
+            console.print(Panel(example.mongodb, border_style="dim"))
+            console.print(f"[dim]Why:[/dim] {example.explanation}")
+        
+        if rewrite_result.errors:
+            console.print("\n[yellow]Rewrite warnings:[/yellow]")
+            for err in rewrite_result.errors:
+                console.print(f"  [dim]• {err}[/dim]")
 
 
 def _display_dynamodb_summary(target_schema) -> None:
@@ -1177,6 +1031,13 @@ def _display_dynamodb_summary(target_schema) -> None:
     
     # Get full design from metadata
     dynamo_design = metadata.get("dynamodb_design", {})
+    
+    # Show AI review status
+    if dynamo_design.get("ai_reviewed"):
+        if dynamo_design.get("ai_review_applied"):
+            console.print("[green]✓ AI reviewed and applied suggestions[/green]")
+        else:
+            console.print("[green]✓ AI reviewed (no changes needed)[/green]")
     
     if design_mode == "single_table":
         # Show entities
@@ -1241,6 +1102,51 @@ def _display_dynamodb_summary(target_schema) -> None:
         console.print("\n[yellow]⚠ Warnings:[/yellow]")
         for w in warnings:
             console.print(f"  [dim]• {w}[/dim]")
+
+
+# =============================================================================
+# History command (unchanged)
+# =============================================================================
+
+@cli.command()
+@click.option(
+    "--analysis-id",
+    type=str,
+    required=True,
+    help="Analysis ID to view",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json", "markdown"]),
+    default="text",
+    help="Output format",
+)
+def history(analysis_id: str, output_format: str) -> None:
+    """View analysis history and results."""
+    repo = AnalysisRepository()
+    
+    analysis = repo.get_analysis(analysis_id)
+    if not analysis:
+        console.print(f"[red]Analysis {analysis_id} not found[/red]")
+        sys.exit(1)
+    
+    result = repo.get_analysis_result(analysis_id)
+    recommendations = repo.get_recommendations(analysis_id)
+    target_schema = repo.get_target_schema(analysis_id)
+    
+    if output_format == "json":
+        output = {
+            "analysis": analysis,
+            "result": result,
+            "recommendations": recommendations,
+            "target_schema": target_schema,
+        }
+        console.print(json.dumps(output, indent=2, default=str))
+    elif output_format == "markdown":
+        _print_markdown_report(analysis, result, recommendations, target_schema)
+    else:
+        _print_text_report(analysis, result, recommendations, target_schema)
 
 
 def _print_text_report(analysis, result, recommendations, target_schema) -> None:
