@@ -4,9 +4,9 @@
 
 ## Project Overview
 
-**Schema Travels** is a CLI tool that analyzes SQL database query patterns and recommends optimal NoSQL (MongoDB/DynamoDB) schema designs. It uses Claude AI for intelligent recommendations.
+**Schema Travels** is a CLI tool that analyzes SQL database query patterns and recommends optimal NoSQL (MongoDB/DynamoDB) schema designs. It supports multiple LLM providers for AI recommendations.
 
-**Current Version:** 2.0.1
+**Current Version:** 2.3.0
 
 ## Architecture
 
@@ -14,7 +14,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                         CLI (Click)                             │
 │                     schema-travels analyze                      │
-│                  --target [mongodb|dynamodb]                    │
+│         --target [mongodb|dynamodb] --provider [...]            │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
         ┌─────────────┼─────────────┐
@@ -22,26 +22,33 @@
 ┌───────────┐  ┌───────────┐  ┌─────────────────┐
 │ Collector │  │ Analyzer  │  │   Recommender   │
 │           │  │           │  │                 │
-│ • Logs    │  │ • HotJoins│  │ MongoDB:        │
-│ • Schema  │  │ • Mutation│  │  • Claude recs  │
-│           │  │ • Pattern │  │                 │
-│           │  │           │  │ DynamoDB:       │
-│           │  │           │  │  • Designer     │
-│           │  │           │  │  • Claude review│
+│ • Logs    │  │ • HotJoins│  │ • Advisor       │
+│ • Schema  │  │ • Mutation│  │   (provider-    │
+│           │  │ • Pattern │  │    agnostic)    │
 └─────┬─────┘  └─────┬─────┘  └────────┬────────┘
       │              │                 │
       └──────────────┼─────────────────┘
                      ▼
-              ┌───────────┐     ┌───────────┐
-              │ Simulator │────▶│Persistence│
-              │           │     │ (SQLite)  │
-              └───────────┘     └───────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    LLM Provider Layer (v2.3.0)                  │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
+│  │  Claude  │ │  OpenAI  │ │  Gemini  │ │   Grok   │ │ Ollama │ │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                     │
+              ┌──────┴──────┐
+              ▼             ▼
+        ┌───────────┐  ┌───────────┐
+        │ Simulator │  │Persistence│
+        │           │  │ (SQLite)  │
+        └───────────┘  └───────────┘
 ```
 
 ## Key Modules
 
 | Module | Purpose | Key Files |
 |--------|---------|-----------|
+| `llm/` | LLM provider abstraction (v2.3.0) | `provider.py`, `factory.py`, `providers/*.py` |
 | `collector/` | Parse DB logs & SQL schemas | `log_parser.py`, `schema_parser.py` |
 | `analyzer/` | Detect patterns (joins, mutations, columns) | `hot_joins.py`, `mutations.py`, `pattern_analyzer.py` |
 | `recommender/` | AI recommendations + schema generation | See detailed table below |
@@ -49,11 +56,24 @@
 | `persistence/` | SQLite storage | `database.py`, `repository.py` |
 | `cli/` | Command-line interface | `main.py` |
 
-### Recommender Module (v2.0.1)
+### LLM Module (v2.3.0)
 
 | File | Purpose |
 |------|---------|
-| `claude_advisor.py` | AI: MongoDB recs + DynamoDB review |
+| `provider.py` | `LLMProvider` protocol, `LLMResponse`, exceptions |
+| `factory.py` | `get_provider()`, `list_providers()`, `get_provider_info()` |
+| `providers/claude.py` | Anthropic Claude implementation |
+| `providers/openai.py` | OpenAI GPT implementation |
+| `providers/gemini.py` | Google Gemini implementation |
+| `providers/grok.py` | xAI Grok implementation (OpenAI-compatible) |
+| `providers/ollama.py` | Ollama local models implementation |
+
+### Recommender Module
+
+| File | Purpose |
+|------|---------|
+| `advisor.py` | Provider-agnostic AI advisor (v2.3.0) |
+| `claude_advisor.py` | Backwards-compatible alias → Advisor |
 | `schema_generator.py` | Generate target schemas |
 | `cache.py` | Hash-based caching |
 | `query_rewriter.py` | SQL → MongoDB rewrites |
@@ -63,13 +83,63 @@
 | `dynamodb_output.py` | JSON/Terraform/NoSQL Workbench |
 | `dynamodb_review.py` | Apply AI review to design |
 
+## LLM Provider Usage
+
+### Provider Selection
+
+```python
+from schema_travels.llm import get_provider, list_providers
+
+# List available providers
+providers = list_providers()  # ['claude', 'openai', 'gemini', 'grok', 'ollama']
+
+# Get a provider
+provider = get_provider("openai", model="gpt-4o")
+response = provider.complete("Analyze this schema...")
+```
+
+### Using Advisor
+
+```python
+from schema_travels.recommender import Advisor
+
+# Provider-agnostic advisor
+advisor = Advisor(provider_name="openai", model="gpt-4o")
+
+# MongoDB recommendations
+recs = advisor.get_recommendations(schema, analysis, TargetDatabase.MONGODB)
+
+# DynamoDB review
+review = advisor.review_dynamodb_design(local_design, analysis, schema)
+```
+
+### Backwards Compatibility
+
+```python
+# Old code still works
+from schema_travels.recommender import ClaudeAdvisor
+
+advisor = ClaudeAdvisor()  # Uses Claude by default
+# ClaudeAdvisor is now an alias for Advisor
+```
+
+## Provider Configuration
+
+| Provider | Default Model | API Key Env Var | Extra Config |
+|----------|--------------|-----------------|--------------|
+| Claude | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` | — |
+| OpenAI | `gpt-4o` | `OPENAI_API_KEY` | — |
+| Gemini | `gemini-2.0-flash` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | — |
+| Grok | `grok-3` | `XAI_API_KEY` or `GROK_API_KEY` | — |
+| Ollama | `llama3.1:8b` | None | `OLLAMA_HOST` |
+
 ## Target Database Flows
 
 ### MongoDB Flow
 
 ```python
-# Claude acts as ARCHITECT — designs the schema
-advisor = ClaudeAdvisor()
+# LLM acts as ARCHITECT — designs the schema
+advisor = Advisor(provider_name="openai")
 recommendations = advisor.get_recommendations(schema, analysis, TargetDatabase.MONGODB)
 # Returns: [SchemaRecommendation(decision=EMBED/REFERENCE, ...)]
 
@@ -84,8 +154,8 @@ target_schema = generator.generate(TargetDatabase.MONGODB)
 designer = DynamoDBDesigner(mode=DesignMode.AUTO)
 local_design = designer.design(table_stats, access_patterns, ...)
 
-# 2. Claude acts as REVIEWER — validates the design
-advisor = ClaudeAdvisor()
+# 2. LLM acts as REVIEWER — validates the design
+advisor = Advisor(provider_name="gemini")
 review = advisor.review_dynamodb_design(local_design, analysis, schema)
 # Returns: DynamoDBReview(approved=True, entity_changes=[], gsi_changes=[], ...)
 
@@ -103,18 +173,25 @@ target_schema = generator.generate(TargetDatabase.DYNAMODB)
 ### Basic Usage
 
 ```bash
-# MongoDB (default)
+# MongoDB (default provider: Claude)
 schema-travels analyze \
     --logs-dir ./logs \
     --schema-file ./schema.sql \
     --output results.json
 
-# DynamoDB
+# With different provider
 schema-travels analyze \
+    --provider openai \
+    --model gpt-4o \
     --logs-dir ./logs \
-    --schema-file ./schema.sql \
-    --target dynamodb \
-    --output results.json
+    --schema-file ./schema.sql
+
+# Local Ollama
+schema-travels analyze \
+    --provider ollama \
+    --model llama3.1:70b \
+    --logs-dir ./logs \
+    --schema-file ./schema.sql
 ```
 
 ### DynamoDB-Specific Options
@@ -122,144 +199,30 @@ schema-travels analyze \
 ```bash
 schema-travels analyze \
     --target dynamodb \
-    --dynamodb-mode auto \           # auto | single | multi
-    --dynamodb-output terraform \    # json | terraform | nosql_workbench
+    --provider gemini \
+    --dynamodb-mode auto \
+    --dynamodb-output terraform \
     --logs-dir ./logs \
     --schema-file ./schema.sql
 ```
 
-### AI Control
+### List Providers
 
 ```bash
-# Skip AI (use local algorithmic design only for DynamoDB)
-schema-travels analyze --target dynamodb --no-ai ...
-
-# Force fresh AI analysis (bypass cache)
-schema-travels analyze --no-cache ...
-
-# Clear all cached results
-schema-travels analyze --clear-cache ...
-```
-
-### Cache Modes
-
-```bash
-# Relaxed (default): Ignores small log changes
-schema-travels analyze --cache-mode relaxed ...
-
-# Strict: Any change invalidates cache
-schema-travels analyze --cache-mode strict ...
-```
-
-## Key Data Models
-
-### DynamoDB Models (v2.0.0)
-
-```python
-class DesignMode(Enum):
-    SINGLE_TABLE = "single_table"
-    MULTI_TABLE = "multi_table"
-    AUTO = "auto"
-
-class ProjectionType(Enum):
-    KEYS_ONLY = "KEYS_ONLY"
-    INCLUDE = "INCLUDE"
-    ALL = "ALL"
-
-class DynamoDBDesign(BaseModel):
-    design_mode: DesignMode
-    confidence: float
-    entities: list[EntityDefinition]
-    gsis: list[GSIDefinition]
-    clusters: list[AccessCluster]
-    orphan_tables: list[str]
-    warnings: list[str]
-    ai_reviewed: bool = False
-    ai_review_applied: bool = False
-```
-
-### DynamoDB Review Models (v2.0.1)
-
-```python
-class DynamoDBReview(BaseModel):
-    approved: bool
-    confidence: float
-    summary: str
-    entity_changes: list[EntityChange]
-    gsi_changes: list[GSIChange]
-    warnings: list[str]
-    suggestions: list[str]
-    
-    @property
-    def has_changes(self) -> bool
-    
-    @property
-    def change_count(self) -> int
-```
-
-## Algorithm Details
-
-### DynamoDB Access Clustering
-
-```python
-# Union-Find to group co-accessed tables
-CO_ACCESS_THRESHOLD = 0.70
-
-for join in join_patterns:
-    if join.co_access_ratio > CO_ACCESS_THRESHOLD:
-        union(join.table_a, join.table_b)
-
-# Tables in same cluster → single-table candidates
-# Orphan tables → separate tables
-```
-
-### GSI Selection
-
-```python
-GSI_FREQUENCY_THRESHOLD = 5
-MAX_GSIS = 5
-
-for column, frequency in filtered_columns.items():
-    if frequency >= GSI_FREQUENCY_THRESHOLD:
-        if column not in primary_key:
-            create_gsi(column)
-            
-# Projection type based on SELECT patterns:
-# - SELECT * used → ALL
-# - Specific columns → INCLUDE
-# - Only keys → KEYS_ONLY
-```
-
-## Key Decision Rules (MongoDB Embed vs Reference)
-
-```python
-# Rule 1: Unbounded children → REFERENCE
-if max_children > 1000:
-    decision = "REFERENCE"
-
-# Rule 2: High co-access + low writes + bounded → EMBED  
-elif co_access_ratio > 0.7 and write_ratio < 0.3 and max_children < 100:
-    decision = "EMBED"
-
-# Rule 3: Child accessed alone frequently → REFERENCE
-elif child_solo_ratio > 0.4:
-    decision = "REFERENCE"
-
-# Rule 4: High child writes → REFERENCE
-elif child_write_ratio > 0.5:
-    decision = "REFERENCE"
-
-# Default: REFERENCE (safer)
-else:
-    decision = "REFERENCE"
+schema-travels providers
 ```
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Claude API key | Required for AI |
-| `ANTHROPIC_MODEL` | Model to use | `claude-sonnet-4-20250514` |
+| `ANTHROPIC_API_KEY` | Claude API key | Required for Claude |
+| `OPENAI_API_KEY` | OpenAI API key | Required for OpenAI/Grok |
+| `GOOGLE_API_KEY` | Google AI API key | Required for Gemini |
+| `XAI_API_KEY` | xAI API key | Required for Grok |
+| `SCHEMA_TRAVELS_PROVIDER` | Default LLM provider | `claude` |
+| `SCHEMA_TRAVELS_MODEL` | Default model | Provider-specific |
+| `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `DATABASE_PATH` | SQLite DB location | `~/.schema-travels/schema_travels.db` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
 
@@ -270,7 +233,7 @@ else:
 ├── schema_travels.db     # Analysis history (SQLite)
 └── cache/
     ├── index.json        # Cache index with metadata
-    ├── <hash>.json       # Cached MongoDB recommendations
+    ├── <hash>.json       # Cached recommendations (includes provider/model)
     └── <hash>_review.json # Cached DynamoDB AI reviews
 ```
 
@@ -280,11 +243,14 @@ else:
 # Install in dev mode
 pip install -e ".[dev]"
 
+# Install with all providers
+pip install -e ".[dev,all-providers]"
+
 # Run tests
 pytest
 
 # Run specific test
-pytest tests/test_dynamodb_review.py -v
+pytest tests/test_llm_providers.py -v
 
 # Lint
 ruff check src/
@@ -300,6 +266,7 @@ mypy src/schema_travels
 
 | Test File | Purpose |
 |-----------|---------|
+| `test_llm_providers.py` | LLM provider unit tests (v2.3.0) |
 | `test_dynamodb_designer.py` | Unit tests for clustering algorithm |
 | `test_dynamodb_output.py` | Output formatter tests |
 | `test_dynamodb_review.py` | AI review + apply_review tests |
@@ -307,6 +274,48 @@ mypy src/schema_travels
 | `test_analyzer.py` | Pattern analysis tests |
 
 ## Common Tasks
+
+### Adding a new LLM provider
+
+1. Create provider in `src/schema_travels/llm/providers/{name}.py`:
+   ```python
+   class NewProvider:
+       def __init__(self, model: str | None = None, **kwargs):
+           self._model = model or "default-model"
+       
+       @property
+       def provider_name(self) -> str:
+           return "newprovider"
+       
+       @property
+       def model(self) -> str:
+           return self._model
+       
+       def complete(self, prompt: str, **kwargs) -> str:
+           # Implementation
+           pass
+       
+       def chat(self, messages: list[dict], **kwargs) -> str:
+           # Implementation
+           pass
+   ```
+
+2. Register in `llm/factory.py`:
+   ```python
+   _PROVIDER_REGISTRY = {
+       "newprovider": {
+           "class": "schema_travels.llm.providers.newprovider:NewProvider",
+           "default_model": "default-model",
+           "env_vars": ["NEW_API_KEY"],
+           "install": "pip install new-sdk",
+       },
+       # ...
+   }
+   ```
+
+3. Add tests in `tests/test_llm_providers.py`
+
+4. Update documentation
 
 ### Adding a new target database (e.g., Cassandra)
 
@@ -340,7 +349,7 @@ rm -rf ~/.schema-travels/cache/
 
 Edit `recommender/cache.py`:
 ```python
-RECOMMENDATION_VERSION = "2.0.1"  # Bump this
+RECOMMENDATION_VERSION = "2.3.0"  # Bump this
 ```
 
 ## Dependencies
@@ -350,7 +359,12 @@ Core:
 - `click` — CLI framework
 - `rich` — Terminal formatting
 - `anthropic` — Claude API
+- `httpx` — HTTP client (Ollama)
 - `pydantic` — Configuration
+
+Optional Providers:
+- `openai` — OpenAI/Grok API
+- `google-generativeai` — Gemini API
 
 Dev:
 - `pytest` — Testing

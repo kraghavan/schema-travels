@@ -17,7 +17,9 @@ cd schema-travels
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -e ".[dev]"
+
+# Install with all providers for testing
+pip install -e ".[dev,all-providers]"
 ```
 
 ### 3. Create a Branch
@@ -41,6 +43,9 @@ pytest --cov=schema_travels
 
 # Run specific test file
 pytest tests/test_analyzer.py -v
+
+# Run LLM provider tests
+pytest tests/test_llm_providers.py -v
 ```
 
 ### Code Style
@@ -157,18 +162,29 @@ git push origin feature/your-feature-name
 ```
 schema-travels/
 ├── src/schema_travels/
-│   ├── __init__.py          # Package version
+│   ├── __init__.py           # Package version
 │   ├── config.py             # Configuration management
+│   ├── llm/                  # LLM provider abstraction (v2.3.0)
+│   │   ├── __init__.py       # Public API
+│   │   ├── provider.py       # LLMProvider protocol
+│   │   ├── factory.py        # Provider factory
+│   │   └── providers/        # Provider implementations
+│   │       ├── claude.py
+│   │       ├── openai.py
+│   │       ├── gemini.py
+│   │       ├── grok.py
+│   │       └── ollama.py
 │   ├── collector/            # Log and schema parsing
-│   │   ├── log_parser.py     # PostgreSQL/MySQL log parsing
-│   │   ├── schema_parser.py  # SQL DDL parsing
-│   │   └── models.py         # Data models
+│   │   ├── log_parser.py
+│   │   ├── schema_parser.py
+│   │   └── models.py
 │   ├── analyzer/             # Pattern analysis
-│   │   ├── hot_joins.py      # Join pattern detection
-│   │   ├── mutations.py      # Read/write analysis
+│   │   ├── hot_joins.py
+│   │   ├── mutations.py
 │   │   └── pattern_analyzer.py
 │   ├── recommender/          # Recommendation engine
-│   │   ├── claude_advisor.py # AI integration
+│   │   ├── advisor.py        # Provider-agnostic advisor
+│   │   ├── claude_advisor.py # Backwards-compat alias
 │   │   └── schema_generator.py
 │   ├── simulator/            # Migration simulation
 │   └── cli/                  # CLI interface
@@ -178,6 +194,90 @@ schema-travels/
 ```
 
 ## Adding Features
+
+### Adding a New LLM Provider (v2.3.0)
+
+1. Create provider in `src/schema_travels/llm/providers/`:
+   ```python
+   # newprovider.py
+   from schema_travels.llm.provider import LLMProviderError, APIKeyMissingError
+   
+   class NewProvider:
+       """New LLM provider implementation."""
+       
+       def __init__(self, model: str | None = None, **kwargs):
+           self._model = model or "default-model"
+           self._client = None
+           
+       @property
+       def provider_name(self) -> str:
+           return "newprovider"
+       
+       @property
+       def model(self) -> str:
+           return self._model
+       
+       def _get_client(self):
+           if self._client is None:
+               import os
+               api_key = os.environ.get("NEW_API_KEY")
+               if not api_key:
+                   raise APIKeyMissingError(
+                       "newprovider",
+                       ["NEW_API_KEY"],
+                       "pip install new-sdk"
+                   )
+               from new_sdk import Client
+               self._client = Client(api_key=api_key)
+           return self._client
+       
+       def complete(self, prompt: str, **kwargs) -> str:
+           client = self._get_client()
+           try:
+               response = client.generate(prompt=prompt, model=self._model)
+               return response.text
+           except Exception as e:
+               raise LLMProviderError(f"NewProvider error: {e}")
+       
+       def chat(self, messages: list[dict], **kwargs) -> str:
+           # Convert messages to provider format
+           client = self._get_client()
+           # ... implementation
+   ```
+
+2. Register in `llm/factory.py`:
+   ```python
+   _PROVIDER_REGISTRY = {
+       # ... existing providers
+       "newprovider": {
+           "class": "schema_travels.llm.providers.newprovider:NewProvider",
+           "default_model": "default-model",
+           "env_vars": ["NEW_API_KEY"],
+           "install": "pip install new-sdk",
+       },
+   }
+   ```
+
+3. Export in `llm/providers/__init__.py`:
+   ```python
+   from schema_travels.llm.providers.newprovider import NewProvider
+   ```
+
+4. Add optional dependency in `pyproject.toml`:
+   ```toml
+   [project.optional-dependencies]
+   newprovider = ["new-sdk>=1.0.0"]
+   ```
+
+5. Add tests in `tests/test_llm_providers.py`:
+   ```python
+   def test_newprovider_initialization():
+       provider = NewProvider(model="test-model")
+       assert provider.provider_name == "newprovider"
+       assert provider.model == "test-model"
+   ```
+
+6. Update documentation in `README.md`, `CLAUDE.md`, `ARCHITECTURE.md`
 
 ### Adding a New Database Source
 
@@ -213,9 +313,57 @@ schema-travels/
        CASSANDRA = "cassandra"  # Add here
    ```
 
-2. Create generator method in `schema_generator.py`
+2. Create design models in `recommender/{target}_models.py`
 
-3. Add cost model in `simulator/cost_model.py`
+3. Create designer in `recommender/{target}_designer.py`
+
+4. Add generator method in `schema_generator.py`
+
+5. Add cost model in `simulator/cost_model.py`
+
+6. Update CLI in `cli/main.py`
+
+## Testing LLM Providers
+
+### Unit Tests (No API calls)
+
+```python
+def test_provider_initialization():
+    """Test provider can be created without API key."""
+    provider = OpenAIProvider(model="gpt-4o")
+    assert provider.provider_name == "openai"
+    assert provider.model == "gpt-4o"
+
+def test_missing_api_key():
+    """Test proper error when API key missing."""
+    with pytest.raises(APIKeyMissingError) as exc:
+        provider = OpenAIProvider()
+        provider.complete("test")
+    assert "OPENAI_API_KEY" in str(exc.value)
+```
+
+### Integration Tests (Requires API keys)
+
+```python
+@pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="No API key")
+def test_openai_complete():
+    """Test actual API call."""
+    provider = OpenAIProvider()
+    response = provider.complete("Say 'test'")
+    assert len(response) > 0
+```
+
+### Mock Tests
+
+```python
+def test_advisor_with_mock_provider(mocker):
+    """Test advisor with mocked provider."""
+    mock_provider = mocker.Mock()
+    mock_provider.complete.return_value = '{"recommendations": []}'
+    
+    advisor = Advisor(provider=mock_provider)
+    # Test advisor logic without API calls
+```
 
 ## Getting Help
 

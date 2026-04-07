@@ -14,6 +14,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.0] - 2025-04-06
+
+### Added
+- **Multi-Provider LLM Support**
+  - New `--provider` flag: `claude`, `openai`, `gemini`, `grok`, `ollama`
+  - New `--model` flag: Override default model for any provider
+  - New `--ollama-host` flag: Connect to remote Ollama servers
+  - New `providers` command: List available providers and configuration
+
+- **LLM Provider Abstraction Layer**
+  - New module: `llm/` with `LLMProvider` protocol
+  - Provider implementations: Claude, OpenAI, Gemini, Grok, Ollama
+  - Factory function: `get_provider()` for dynamic provider selection
+  - Environment variable support: `SCHEMA_TRAVELS_PROVIDER`, `SCHEMA_TRAVELS_MODEL`
+
+- **Provider-Agnostic Advisor**
+  - `Advisor` class replaces direct Claude dependency
+  - `ClaudeAdvisor` preserved as backwards-compatible alias
+  - Works with any provider implementing `LLMProvider` protocol
+
+- **Optional Dependencies**
+  - `pip install schema-travels[openai]` — OpenAI support
+  - `pip install schema-travels[gemini]` — Google Gemini support
+  - `pip install schema-travels[all-providers]` — All cloud providers
+  - Ollama requires no extra dependencies (uses httpx)
+
+### Provider Details
+
+| Provider | Default Model | API Key Env Var | Install |
+|----------|--------------|-----------------|---------|
+| Claude | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` | Built-in |
+| OpenAI | `gpt-4o` | `OPENAI_API_KEY` | `[openai]` |
+| Gemini | `gemini-2.0-flash` | `GOOGLE_API_KEY` | `[gemini]` |
+| Grok | `grok-3` | `XAI_API_KEY` | `[openai]` |
+| Ollama | `llama3.1:8b` | None (local) | Built-in |
+
+### Changed
+- CLI `analyze` command now accepts `--provider`, `--model`, `--ollama-host`
+- Cache metadata includes provider and model used
+- Error messages include provider-specific setup instructions
+
+### Technical
+- New module: `src/schema_travels/llm/`
+- New files: `provider.py`, `factory.py`, `providers/*.py`
+- Updated: `recommender/advisor.py` (provider-agnostic)
+- Updated: `cli/main.py` (new flags)
+- New exceptions: `LLMProviderError`, `APIKeyMissingError`, `ProviderNotFoundError`
+
+---
+
 ## [2.0.1] - 2025-03-27
 
 ### Added
@@ -231,6 +281,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[2.3.0]: https://github.com/kraghavan/schema-travels/compare/v2.0.1...v2.3.0
 [2.0.1]: https://github.com/kraghavan/schema-travels/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/kraghavan/schema-travels/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/kraghavan/schema-travels/compare/v1.2.0...v1.3.0
